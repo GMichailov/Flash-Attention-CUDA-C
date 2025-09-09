@@ -92,10 +92,31 @@ __global__ void FlashAttentionV1(
             float score = __shfl_sync(0xffffffff, partialDotProduct, 0) * scale;
 
             // Step 4: Apply Softmax
-        }
+            float newM = fmaxf(mWarp, score);
+            float expNew = expf(mWarp - newM);
+            float expOld = expNew * lWarp;
+            float newL = expOld + expNew;
+            float oldScale = expOld / newL;
+            float newScale = expNew / newL;
 
+            mWarp = newM;
+            lWarp = newL;
 
-        
+            float outFrag[FRAG] = {0.0f};
+
+            const float* vRowPtr = &vSmem[kvRow * d_head + laneId * FRAG];
+            #pragma unroll
+            for (int i = 0; i < FRAG; i++) {
+                outFrag[i] = outFrag[i] * oldScale + vRowPtr[i] * newScale;
+            }
+
+            float* oPtr = O + blockIdx.z * stride_batch_o + blockIdx.y * stride_head_o + qRow * d_head + laneId * FRAG;
+
+            #pragma unroll
+            for (int i = 0; i < FRAG; i++) {
+                oPtr[i] = outFrag[i];
+            }
+        }    
         // Repear steps 2-4 until done.
     }
 
