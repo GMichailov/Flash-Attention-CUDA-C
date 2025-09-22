@@ -11,7 +11,31 @@
 using pipe_t = cuda::pipeline<cuda::thread_scope_block>;
 
 __shared__ pipe_t pipeK;
-__shared__ pipe_t pipeQ;
+__shared__ pipe_t pipeV;
+
+
+__device__ __forceinline__ void setSmemPointers(
+    float* __restrict__ (&smemK)[2], float* __restrict__ (&smemV)[2],
+    float* __restrict__ &O, float* __restrict__ &L, float* __restrict__ &M,
+    int kvElements, int qElements, int BLOCK_Q_ROWS
+)
+{
+    extern __shared__ float smem[];
+    int offset=0;
+    smemK[0] = smem + offset;
+    offset += kvElements;
+    smemK[1] = smem + offset;
+    offset += kvElements;
+    smemV[0] = smem + offset;
+    offset += kvElements;
+    smemV[1] = smem + offset;
+    offset += kvElements;
+    O = smem + offset;
+    offset += qElements;
+    L = smem + offset;
+    offset += BLOCK_Q_ROWS;
+    M = smem + offset;
+}
 
 template<int DHEAD, int BLOCK_Q_ROWS, int ROWS_PER_WARP>
 __device__ __forceinline__ void loadQRegisters(
@@ -41,13 +65,12 @@ __device__ __forceinline__ void loadQRegisters(
 template<int TILE_SIZE>
 __device__ __forceinline__ void asyncBufferLoad(
     const float* __restrict__ matrix, float* __restrict__ matrixSmem,
-    int thread, 
-    int offset, int fragmentSize,
+    int tileOffset, int thread, int fragmentSize,
     pipe_t& pipe
 ) {
     if (thread == 0) pipe.producer_acquire();
     // Change this to iterate through the chunks
-    int base = thread * fragmentSize;
+    int base = tileOffset + thread * fragmentSize;
     #pragma unroll
     for (int reads = 0; reads < fragmentSize / 4; ++reads) {
         if (thread * fragmentSize <= TILE_SIZE) {
@@ -59,7 +82,7 @@ __device__ __forceinline__ void asyncBufferLoad(
     if (!thread) pipe.producer_commit();
 }
     
-template<int DHEAD, int BLOCK_Q_ROWS, int ROWS_PER_WARP>
+template<int DHEAD, int BLOCK_Q_ROWS, int BLOCK_KV_ROWS, int ROWS_PER_WARP>
 __global__ void causalFlashAttention(
     const float* __restrict__ Q, const float* __restrict__ K, const float* __restrict__ V,
     const float* __restrict__ L, const float* __restrict__ M,
@@ -71,17 +94,70 @@ __global__ void causalFlashAttention(
     int BLOCK_KV_ROWS
 )
 {
+    extern __shared__ float smem[];
     int warpId = threadIdx.x / WARP;
     int thread = threadIdx.x % WARP;
-    // Load Q tile
-    constexpr int fragmentSize = DHEAD * BLOCK_Q_ROWS * ROWS_PER_WARP / WARP;
-    float QFrag[fragmentSize];
-    loadQRegisters<DHEAD, BLOCK_Q_ROWS, ROWS_PER_WARP>(
-        Q, QFrag,
-        blockIdx.z * strideBatchQ, blockIdx.y * strideHeadQ,
-        warpId, thread, fragmentSize
-    );
-    __syncthreads();
-    
 
+    // Instantiate pipes. (Could I reuse the same pipes throughout rather than per attention block?)
+    if (thread == 0) {
+        new (&pipeK) pipe_t();
+    } else if (thread == 1) {
+        new (&pipeV) pipe_t();
+    }
+    __syncthreads();
+
+    constexpr int QTileSize = DHEAD * BLOCK_Q_ROWS;
+    constexpr int QFragmentSize = QTileSize / WARP;
+    constexpr int KTileSize = DHEAD * BLOCK_KV_ROWS;
+    constexpr int KFragmentSize = KTileSize / WARP;
+
+    float* smemK[2];
+    float* smemV[2];
+    float* smemO;
+    float* smemL;
+    float* smemM;
+
+    setSmemPointers(smemK, smemV, smemO, smemL, smemM, KTileSize, QTileSize, BLOCK_Q_ROWS);
+    
+    // Async load first KV tiles with warps 0 and 1.
+    if (warpId == 0) {
+        // Load K
+        asyncBufferLoad<KTileSize>(
+            K, smemK[0],
+            0, thread, KFragmentSize, pipeK
+        );
+    } else if (warpId == 1) {
+        // Load V
+        asyncBufferLoad<KTileSize>(
+            V, smemV[0],
+            0, thread, KFragmentSize, pipeV
+        );
+    } else {
+        // Load Q tile
+        float QFrag[QFragmentSize];
+        loadQRegisters<DHEAD, BLOCK_Q_ROWS, ROWS_PER_WARP>(
+            Q, QFrag,
+            blockIdx.z * strideBatchQ, blockIdx.y * strideHeadQ,
+            warpId, thread, QFragmentSize
+        );
+    }
+    __syncthreads();
+    int buf = 1;
+    for (int kvtile = BLOCK_KV_ROWS; kvtile < seqLenK; kvtile += BLOCK_KV_ROWS) {
+        // Quick call consumer wait on the pipes() for calculation warps.
+        // Call async loads in auxiliary buffers in warps 0 and 1.
+        if (warpId == 0) {
+            asyncBufferLoad<KTileSize>(
+                K, smemK[buf], kvtile
+                thread, KFragmentSize, pipeK
+            );
+        } else if (warpId == 1) {
+            asyncBufferLoad<KTileSize>(
+                V, smemV[0], kvtile,
+                thread, KFragmentSize, pipeV
+            );
+        } else {
+            // Compute QK^T
+        }
+    }
 }
