@@ -8,6 +8,11 @@
 #define WARP 32
 #define FLOAT_SIZE 4
 
+using pipe_t = cuda::pipeline<cuda::thread_scope_block>;
+
+__shared__ pipe_t pipeK;
+__shared__ pipe_t pipeQ;
+
 template<int DHEAD, int BLOCK_Q_ROWS, int ROWS_PER_WARP>
 __device__ __forceinline__ void loadQRegisters(
     const float* __restrict__ Q,
@@ -32,23 +37,26 @@ __device__ __forceinline__ void loadQRegisters(
     }
 }
 
+// Assume one warp per tile
 template<int TILE_SIZE>
 __device__ __forceinline__ void asyncBufferLoad(
-        const float* __restrict__ matrix, float* __restrict__ matrixSmem, 
-        int offset, int fragmentSize,
-        cuda::pipeline<cuda::thread_scope_thread>& pipe
-    ) {
-    extern __shared__ float smem[];
-    auto pipe = cuda::make_pipeline();
-    int thread = threadIdx.x;
+    const float* __restrict__ matrix, float* __restrict__ matrixSmem,
+    int thread, 
+    int offset, int fragmentSize,
+    pipe_t& pipe
+) {
+    if (thread == 0) pipe.producer_acquire();
     // Change this to iterate through the chunks
-    if (thread * 4 < TILE_SIZE) {
-        const float4* globalMemPtr = reinterpret_cast<const float4*>(matrix + offset + thread * 4);
-        float4* smemPtr = reinterpret_cast<float4*>(smem) + thread;
-        pipe.producer_acquire();
-        cuda::memcpy_async(pipe, smemPtr, globalMemPtr, sizeof(float4));
-        pipe.producer_commit();
+    int base = thread * fragmentSize;
+    #pragma unroll
+    for (int reads = 0; reads < fragmentSize / 4; ++reads) {
+        if (thread * fragmentSize <= TILE_SIZE) {
+            const float4* globalMemPtr = reinterpret_cast<const float4*>(matrix + base + reads * 4);
+            float4* smemPtr = reinterpret_cast<float4*>(matrixSmem + base + reads * 4);
+            cuda::memcpy_async(pipe, smemPtr, globalMemPtr, sizeof(float4));
+        }
     }
+    if (!thread) pipe.producer_commit();
 }
     
 template<int DHEAD, int BLOCK_Q_ROWS, int ROWS_PER_WARP>
@@ -63,9 +71,8 @@ __global__ void causalFlashAttention(
     int BLOCK_KV_ROWS
 )
 {
-    auto pipe = cuda::make_pipeline();
     int warpId = threadIdx.x / WARP;
-    int thread = threadIdx.x % 32;
+    int thread = threadIdx.x % WARP;
     // Load Q tile
     constexpr int fragmentSize = DHEAD * BLOCK_Q_ROWS * ROWS_PER_WARP / WARP;
     float QFrag[fragmentSize];
@@ -74,5 +81,7 @@ __global__ void causalFlashAttention(
         blockIdx.z * strideBatchQ, blockIdx.y * strideHeadQ,
         warpId, thread, fragmentSize
     );
-    __syncthreads();    
+    __syncthreads();
+    
+
 }
