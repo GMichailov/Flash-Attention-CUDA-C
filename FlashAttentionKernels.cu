@@ -61,7 +61,6 @@ __device__ __forceinline__ void loadQRegisters(
     }
 }
 
-// Assume one warp per tile
 template<int TILE_SIZE>
 __device__ __forceinline__ void asyncBufferLoad(
     const float* __restrict__ matrix, float* __restrict__ matrixSmem,
@@ -81,7 +80,7 @@ __device__ __forceinline__ void asyncBufferLoad(
     }
     if (!thread) pipe.producer_commit();
 }
-    
+
 template<int DHEAD, int BLOCK_Q_ROWS, int BLOCK_KV_ROWS, int ROWS_PER_WARP>
 __global__ void causalFlashAttention(
     const float* __restrict__ Q, const float* __restrict__ K, const float* __restrict__ V,
@@ -116,6 +115,7 @@ __global__ void causalFlashAttention(
     float* smemO;
     float* smemL;
     float* smemM;
+    float QFrag[QFragmentSize];
 
     setSmemPointers(smemK, smemV, smemO, smemL, smemM, KTileSize, QTileSize, BLOCK_Q_ROWS);
     
@@ -134,7 +134,6 @@ __global__ void causalFlashAttention(
         );
     } else {
         // Load Q tile
-        float QFrag[QFragmentSize];
         loadQRegisters<DHEAD, BLOCK_Q_ROWS, ROWS_PER_WARP>(
             Q, QFrag,
             blockIdx.z * strideBatchQ, blockIdx.y * strideHeadQ,
@@ -142,22 +141,32 @@ __global__ void causalFlashAttention(
         );
     }
     __syncthreads();
-    int buf = 1;
+    int buf = 0;
     for (int kvtile = BLOCK_KV_ROWS; kvtile < seqLenK; kvtile += BLOCK_KV_ROWS) {
-        // Quick call consumer wait on the pipes() for calculation warps.
-        // Call async loads in auxiliary buffers in warps 0 and 1.
-        if (warpId == 0) {
-            asyncBufferLoad<KTileSize>(
-                K, smemK[buf], kvtile
-                thread, KFragmentSize, pipeK
-            );
-        } else if (warpId == 1) {
-            asyncBufferLoad<KTileSize>(
-                V, smemV[0], kvtile,
-                thread, KFragmentSize, pipeV
-            );
-        } else {
-            // Compute QK^T
+        int nextBuf ^= 1;
+
+        // Call async loading first.
+        if (kvtile < numTiles - 1) {
+            if (warpId == 0) asyncBufferLoad<KTileSize>(K, smemK[nextBuf], (kvtile+1)*BLOCK_KV_ROWS, thread, KFragmentSize, pipeK);
+            if (warpId == 1) asyncBufferLoad<KTileSize>(V, smemV[nextBuf], (kvtile+1)*BLOCK_KV_ROWS, thread, KFragmentSize, pipeV);
+        }
+        
+        if (warpId >= 2) {
+            pipeK.consumer_wait();
+            // Mask: 32 bit int where each bit represents which threads are broadcasted to in the warp.
+            // mask is created by creating number of consecutive ones at back for threads listening and then pushes it back however many times as necessary.
+            unsigned mask = ((1u << WARP / ROWS_PER_WARP) - 1) << (((thread * ROWS_PER_WARP) / WARP) * WARP / ROWS_PER_WARP);
+            for (int kvRow = 0; kvRow < BLOCK_KV_ROWS; ++kvRow) {
+                const float* kRowPtr = &smemK[buf][kvRow * D_HEAD + thread * QFragmentSize]; // QFragmentSize bc is equal due to being along d_head.
+                float partialDotProduct = 0.0f;
+
+                #pragma unroll
+                for (int i = 0; i < QFragmentSize; i++) {
+                    partialDotProduct += QFrag[i] * kRowPtr[i];
+                }
+
+                
+            }
         }
     }
 }
