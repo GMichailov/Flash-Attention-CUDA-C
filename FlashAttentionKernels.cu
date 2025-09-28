@@ -42,35 +42,38 @@ __device__ __forceinline__ void setCalculatorSmemPointers(float* __restrict__ &O
 
 
 template<int DHEAD, int BLOCK_Q_ROWS, int ROWS_PER_WARP>
-__device__ __forceinline__ void loadQRegisters(
-    const float* __restrict__ Q,
-    float* __restrict__ QFrag,
-    int batch, int head, int warpId, int thread, int fragmentSize
-) {
-    const float* tile_start = Q + blockIdx.z * strideBatchQ + blockIdx.y * strideHeadQ + blockIdx.x * BLOCK_Q_ROWS;
-    const float* fragmentStart = tile_start + warpId * ROWS_PER_WARP * DHEAD + thread * fragmentSize;
-
-    // Do reads of float4 and only save what's necessary
-    // Logic: Have one thread responsible for float4 and if smaller, calculate how many threads should idle meanwhile.
-    if (fragmentSize >= 4 || thread % 4 == 0) {
-        #pragma unroll
-        for (int reads = 0; reads < fragmentSize; reads+=4) {
+__device__ __forceinline__ void loadQRegisters(const float* __restrict__ Q, float* __restrict__ QFrag, int batch, int head, int warpId, auto laneId, int fragmentSize) {
+    // tile_start = Q + blockIdx.z * strideBatchQ + blockIdx.y * strideHeadQ + blockIdx.x * BLOCK_Q_ROWS;
+    const float* fragmentStart = Q + blockIdx.z * strideBatchQ + blockIdx.y * strideHeadQ + blockIdx.x * BLOCK_Q_ROWS + warpId * ROWS_PER_WARP * DHEAD + laneId * fragmentSize;
+    // Do reads of float4 if possible and only save what's necessary
+    #pragma unroll
+    for (int reads = 0; reads < fragmentSize; reads += 4) {
+        int writes = std::mid(fragmentSize - reads, 4);
+        if (writes == 4) {
             float4 frag = *((const float4*)(fragmentStart + reads));
-            int writes = std::min(fragmentSize - reads, 4);
-            if (writes > 0) QFrag[reads + 0] = frag.x;
-            if (writes > 1) QFrag[reads + 1] = frag.y;
-            if (writes > 2) QFrag[reads + 2] = frag.z;
-            if (writes > 3) QFrag[reads + 3] = frag.w;
+            QFrag[reads] = frag.x;
+            QFrag[reads + 1] = frag.y;
+            QFrag[reads + 2] = frag.z;
+            QFrag[reads + 3] = frag.w;
+        } else if (writes == 3) {
+            // Not 8 or 16 bit aligned so have to do with reads of float and float2
+            float2 frag = *((const float2*)(fragmentStart + reads));
+            QFrag[reads] = frag.x;
+            QFrag[reads + 1] = frag.y;
+            QFrag[reads + 2] = *(fragmentStart + reads + 2);
+        } else if (writes == 2) {
+            float2 frag = *((const float2*)(fragmentStart + reads));
+            QFrag[reads] = frag.x;
+            QFrag[reads + 1] = frag.y;
+        } else {
+            QFrag[reads] = *(fragmentStart + reads);
         }
     }
 }
 
+
 template<int TILE_SIZE>
-__device__ __forceinline__ void asyncBufferLoad(
-    const float* __restrict__ matrix, float* __restrict__ matrixSmem,
-    int tileOffset, int thread, int fragmentSize,
-    pipe_t& pipe
-) {
+__device__ __forceinline__ void asyncBufferLoad(const float* __restrict__ matrix, float* __restrict__ matrixSmem, int tileOffset, int thread, int fragmentSize, pipe_t& pipe) {
     if (thread == 0) pipe.producer_acquire();
     // Change this to iterate through the chunks
     int base = tileOffset + thread * fragmentSize;
