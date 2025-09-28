@@ -17,12 +17,7 @@ __shared__ pipe_t pipeK;
 __shared__ pipe_t pipeV;
 
 
-__device__ __forceinline__ void setLoaderSmemPointers(
-    float* __restrict__ (&smemK)[2], float* __restrict__ (&smemV)[2],
-    float* __restrict__ &O, float* __restrict__ &L, float* __restrict__ &M,
-    int kvElements, int qElements, int BLOCK_Q_ROWS
-)
-{
+__device__ __forceinline__ void setLoaderSmemPointers(float* __restrict__ (&smemK)[2], float* __restrict__ (&smemV)[2], int kvElements) {
     extern __shared__ float smem[];
     int offset=0;
     smemK[0] = smem + offset;
@@ -32,12 +27,6 @@ __device__ __forceinline__ void setLoaderSmemPointers(
     smemV[0] = smem + offset;
     offset += kvElements;
     smemV[1] = smem + offset;
-    offset += kvElements;
-    O = smem + offset;
-    offset += qElements;
-    L = smem + offset;
-    offset += BLOCK_Q_ROWS;
-    M = smem + offset;
 }
 
 
@@ -63,7 +52,6 @@ __device__ __forceinline__ void setCalculatorSmemPointers(
     offset += BLOCK_Q_ROWS;
     M = smem + offset;
 }
-
 
 
 template<int DHEAD, int BLOCK_Q_ROWS, int ROWS_PER_WARP>
@@ -109,6 +97,7 @@ __device__ __forceinline__ void asyncBufferLoad(
     }
     if (!thread) pipe.producer_commit();
 }
+
 
 template<int DHEAD, int BLOCK_Q_ROWS, int BLOCK_KV_ROWS, int ROWS_PER_WARP>
 __global__ void causalFlashAttention2(
