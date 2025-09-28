@@ -30,22 +30,9 @@ __device__ __forceinline__ void setLoaderSmemPointers(float* __restrict__ (&smem
 }
 
 
-__device__ __forceinline__ void setCalculatorSmemPointers(
-    float* __restrict__ (&smemK)[2], float* __restrict__ (&smemV)[2],
-    float* __restrict__ &O, float* __restrict__ &L, float* __restrict__ &M,
-    int kvElements, int qElements, int BLOCK_Q_ROWS
-)
-{
+__device__ __forceinline__ void setCalculatorSmemPointers(float* __restrict__ &O, float* __restrict__ &L, float* __restrict__ &M, int kvElements, int qElements, int BLOCK_Q_ROWS) {
     extern __shared__ float smem[];
-    int offset=0;
-    smemK[0] = smem + offset;
-    offset += kvElements;
-    smemK[1] = smem + offset;
-    offset += kvElements;
-    smemV[0] = smem + offset;
-    offset += kvElements;
-    smemV[1] = smem + offset;
-    offset += kvElements;
+    int offset=kvElements*4;
     O = smem + offset;
     offset += qElements;
     L = smem + offset;
