@@ -17,7 +17,7 @@ __shared__ pipe_t pipeK;
 __shared__ pipe_t pipeV;
 
 
-__device__ __forceinline__ void setSmemPointers(
+__device__ __forceinline__ void setLoaderSmemPointers(
     float* __restrict__ (&smemK)[2], float* __restrict__ (&smemV)[2],
     float* __restrict__ &O, float* __restrict__ &L, float* __restrict__ &M,
     int kvElements, int qElements, int BLOCK_Q_ROWS
@@ -39,6 +39,32 @@ __device__ __forceinline__ void setSmemPointers(
     offset += BLOCK_Q_ROWS;
     M = smem + offset;
 }
+
+
+__device__ __forceinline__ void setCalculatorSmemPointers(
+    float* __restrict__ (&smemK)[2], float* __restrict__ (&smemV)[2],
+    float* __restrict__ &O, float* __restrict__ &L, float* __restrict__ &M,
+    int kvElements, int qElements, int BLOCK_Q_ROWS
+)
+{
+    extern __shared__ float smem[];
+    int offset=0;
+    smemK[0] = smem + offset;
+    offset += kvElements;
+    smemK[1] = smem + offset;
+    offset += kvElements;
+    smemV[0] = smem + offset;
+    offset += kvElements;
+    smemV[1] = smem + offset;
+    offset += kvElements;
+    O = smem + offset;
+    offset += qElements;
+    L = smem + offset;
+    offset += BLOCK_Q_ROWS;
+    M = smem + offset;
+}
+
+
 
 template<int DHEAD, int BLOCK_Q_ROWS, int ROWS_PER_WARP>
 __device__ __forceinline__ void loadQRegisters(
@@ -85,7 +111,7 @@ __device__ __forceinline__ void asyncBufferLoad(
 }
 
 template<int DHEAD, int BLOCK_Q_ROWS, int BLOCK_KV_ROWS, int ROWS_PER_WARP>
-__global__ void causalFlashAttention(
+__global__ void causalFlashAttention2(
     const float* __restrict__ Q, const float* __restrict__ K, const float* __restrict__ V,
     const float* __restrict__ L, const float* __restrict__ M,
     int batchSize, int numHeads,
@@ -97,84 +123,81 @@ __global__ void causalFlashAttention(
 )
 {
     extern __shared__ float smem[];
-    auto warp = cg::tiled_partition<WARP>(cg::this_thread_block());
-    auto rowGroup = cg::tiled_partition<WARP / ROWS_PER_WARP>(warp);
     int warpId = threadIdx.x / WARP;
-    int thread = threadIdx.x % WARP;
+    int laneId = threadIdx.x % WARP;
+    // Split off loader warps
+    if (warpId == 0 || warpId == 1) {
+        constexpr int KTileSize = DHEAD * BLOCK_KV_ROWS;
+        constexpr int KFragmentSize = KTileSize / WARP;
 
-    // Instantiate pipes. (Could I reuse the same pipes throughout rather than per attention block?)
-    if (thread == 0) {
-        new (&pipeK) pipe_t();
-    } else if (thread == 1) {
-        new (&pipeV) pipe_t();
-    }
-    __syncthreads();
-
-    constexpr int QTileSize = DHEAD * BLOCK_Q_ROWS;
-    constexpr int QFragmentSize = QTileSize / WARP;
-    constexpr int KTileSize = DHEAD * BLOCK_KV_ROWS;
-    constexpr int KFragmentSize = KTileSize / WARP;
-
-    float* smemK[2];
-    float* smemV[2];
-    float* smemO;
-    float* smemL;
-    float* smemM;
-    float QFrag[QFragmentSize];
-
-    setSmemPointers(smemK, smemV, smemO, smemL, smemM, KTileSize, QTileSize, BLOCK_Q_ROWS);
-    
-    // Async load first KV tiles with warps 0 and 1.
-    if (warpId == 0) {
-        asyncBufferLoad<KTileSize>(K, smemK[0], 0, thread, KFragmentSize, pipeK);
-    } else if (warpId == 1) {
-        asyncBufferLoad<KTileSize>(V, smemV[0], 0, thread, KFragmentSize, pipeV);
-    } else {
-        loadQRegisters<DHEAD, BLOCK_Q_ROWS, ROWS_PER_WARP>(Q, QFrag, blockIdx.z * strideBatchQ, blockIdx.y * strideHeadQ, warpId, thread, QFragmentSize);
-    }
-    __syncthreads();
-    int buf = 0;
-    int qIdx = blockIdx.x * BLOCK_Q_ROWS + thread * ROWS_PER_WARP / WARP;
-    for (int kvtile = BLOCK_KV_ROWS; kvtile < seqLenK; kvtile += BLOCK_KV_ROWS) {
-        int nextBuf = buf ^ 1;
-
-        // Call async loading first.
-        if (kvtile < numTiles - 1) {
-            if (warpId == 0) asyncBufferLoad<KTileSize>(K, smemK[nextBuf], (kvtile+1)*BLOCK_KV_ROWS, thread, KFragmentSize, pipeK);
-            if (warpId == 1) asyncBufferLoad<KTileSize>(V, smemV[nextBuf], (kvtile+1)*BLOCK_KV_ROWS, thread, KFragmentSize, pipeV);
-        } 
-        if (warpId >= 2) {
-            pipeK.consumer_wait();
-            // Mask: 32 bit int where each bit represents which threads are broadcasted to in the warp.
-            // mask is created by creating number of consecutive ones at back for threads listening and then pushes it back however many times as necessary.
-            unsigned mask = ((1u << WARP / ROWS_PER_WARP) - 1) << (((thread * ROWS_PER_WARP) / WARP) * WARP / ROWS_PER_WARP);
-            for (int kvRow = 0; kvRow < BLOCK_KV_ROWS; ++kvRow) {
-                float score;
-                if (kvtile * BLOCK_KV_ROWS + kvRow > qIdx) {
-                    score = -INFINITY;
-                } else {
-                    float dotPartialProduct = 0.0f;
-                    const float* kRowPtr = &smemK[buf][kvRow * D_HEAD + thread * QFragmentSize]; // QFragmentSize bc is equal due to being along d_head.
-
-                    #pragma unroll
-                    for (int i = 0; i < QFragmentSize; i++) {
-                        dotPartialProduct += QFrag[i] * kRowPtr[i];
-                    }
-                
-                    // Warp reduce into first thread for each row.
-                    score = cg::reduce(rowGroup, dotPartialProduct, cg::plus<float>()) * scale;
-                }
-                // Softmax Calculation updates (only first thread in subgroup does this).
-                if (rowGroup.thread_rank() == 0) {
-                    float newM = fmaxf(smemM[], score);
-                    float expNew = expf(mWarp - newM);
-                    float expOld = expNew * lWarp;
-                    float newL = expOld + expNew;
-                    float oldScale = expOld / newL;
-                    float newScale = expNew / newL;
-                }
-            }
+        // Instantiate pipes
+        if (laneId == 0) {
+            new (&pipeK) pipe_t();
+        } else if (laneId == 1) {
+            new (&pipeV) pipe_t();
         }
-        buf = nextBuf;
+        // Set smem pointers
+        float* smemK[2];
+        float* smemV[2];
+        setLoaderSmemPointers(smemK, smemV, KTileSize, BLOCK_KV_ROWS);
+        // Preload first K and V tiles while Q is being loaded into registers
+        if (warpId == 0) {
+            asyncBufferLoad<KTileSize>(K, smemK[0], 0, laneId, KFragmentSize, pipeK);
+        } else {
+            asyncBufferLoad<KTileSize>(V, smemV[0], 0, laneId, KFragmentSize, pipeV);
+        }
+        // Iteratively load the tiles
+        int buf = 0;
+        for(int loadingOffset = BLOCK_KV_ROWS; loadingOffset < seqLenK; loadingOffset += BLOCK_KV_ROWS) {
+            buf ^= 1;
+            if(warpId == 0) asyncBufferLoad<KTileSize>(K, smemK[buf], loadingOffset, laneId, KFragmentSize, pipeK);
+            else asyncBufferLoad<KTileSize>(V, smemV[buf], loadingOffset, laneId, KFragmentSize, pipeV);
+            __syncthreads();
+        }
+    } else {
+        constexpr int QTileSize = DHEAD * BLOCK_Q_ROWS;
+        constexpr int QFragmentSize = QTileSize / WARP;
+        constexpr int KTileSize = DHEAD * BLOCK_KV_ROWS;
+
+        // Create partitions per Q row
+        auto warp = cg::tiled_partition<WARP>(cg::this_thread_block());
+        auto rowGroup = cg::tiled_partition<WARP / ROWS_PER_WARP>(warp);
+
+        // Set smem pointers needed for calculations
+        float* smemK[2];
+        float* smemV[2];
+        float* smemO;
+        float* smemL;
+        float* smemM;
+        float QFrag[QFragmentSize];
+        setCalculatorSmemPointers(smemK, smemV, smemO, smemL, smemM, KTileSize, QTileSize, BLOCK_Q_ROWS);
+
+        // Load Q into registers
+        loadQRegisters<DHEAD, BLOCK_Q_ROWS, ROWS_PER_WARP>(Q, QFrag, blockIdx.z * strideBatchQ, blockIdx.y * strideHeadQ, warpId, laneId, QFragmentSize);
+
+        int buf = 0;
+        int qIdx = blockIdx.x * BLOCK_Q_ROWS + laneId * ROWS_PER_WARP / WARP;
+        float score;
+        int kvRow = warp.thread_rank() / (WARP / ROWS_PER_WARP);
+        for (int kvtile = BLOCK_KV_ROWS; kvtile < seqLenK; kvtile += BLOCK_KV_ROWS) {
+            pipeK.consumer_wait();
+            // Each rowGroup handles its calculations
+            if (kvtile + kvRow > qIdx) {
+                score = -INFINITY;
+                // Function for updates when score is infinity (probably more efficient).
+            } else {
+                float partialDotProduct = 0.0f;
+                // QFragmentSize bc is equal due to being along d_head for both.
+                const float* kRowPtr = &smemK[buf][kvRow * D_HEAD + laneId * QFragmentSize];
+                #pragma unroll
+                for (int i = 0; i < QFragmentSize; i++) {
+                    partialDotProduct += QFrag[i] * kRowPtr[i];
+                }
+                score = cg::reduce(rowGroup, partialDotProduct, cg::plus<float>()) * scale;
+
+                // Have only first thread in each subgroup do the softmax updates.
+            }
+            buf ^= 1;
+        }
     }
 }
