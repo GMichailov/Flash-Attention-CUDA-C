@@ -165,6 +165,7 @@ __global__ void causalFlashAttention2(
         float* smemL;
         float* smemM;
         float QFrag[QFragmentSize];
+        float OFrag[QFragmentSize];
         setCalculatorSmemPointers(smemK, smemV, smemO, smemL, smemM, KTileSize, QTileSize, BLOCK_Q_ROWS);
 
         // Load Q into registers
@@ -191,6 +192,30 @@ __global__ void causalFlashAttention2(
                 score = cg::reduce(rowGroup, partialDotProduct, cg::plus<float>()) * scale;
 
                 // Have only first thread in each subgroup do the softmax updates.
+                if (!rowGroup.thread_rank()) {
+                    float newMax = fmaxf(smemM[qIdx], score);
+                    smemL[qIdx] = (smemL[qIdx] + 1) * expf(smemM[qIdx] - newMax);
+                    smemM[qIdx] = newMax;
+                }
+                rowGroup.sync();
+
+                // Multiply against V and accumulate.
+                pipeV.consumer_wait();
+                const float* vRowPtr = &smemV[buf][kvRow + rowGroup.thread_rank() * QFragmentSize];
+                #pragma unroll
+                for (int i = 0; i < QFragmentSize; i++) {
+                    OFrag[i] = score * vRowPtr[i];
+                }
+
+                // Broadcast out to rowGroup leader.
+                for (int i = 0; i < QFragmentSize; i++) {
+                    
+                }
+
+                // Update O.
+                if (!rowGroup.thread_rank()) {
+                    float* oRowPtr = &output[qIdx * D_HEAD]
+                }
             }
             buf ^= 1;
         }
