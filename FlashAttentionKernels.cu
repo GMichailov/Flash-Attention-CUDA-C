@@ -4,6 +4,9 @@
 #include <cuda_runtime_api.h>
 #include <cmath>
 #include <cuda/pipeline>
+#include <cooperative_groups.h>
+
+namespace cg = cooperative_groups;
 
 #define WARP 32
 #define FLOAT_SIZE 4
@@ -94,6 +97,8 @@ __global__ void causalFlashAttention(
 )
 {
     extern __shared__ float smem[];
+    auto warp = cg::tiled_partition<WARP>(cg::this_thread_block());
+    auto rowGroup = cg::tiled_partition<WARP / ROWS_PER_WARP>(warp);
     int warpId = threadIdx.x / WARP;
     int thread = threadIdx.x % WARP;
 
@@ -121,52 +126,55 @@ __global__ void causalFlashAttention(
     
     // Async load first KV tiles with warps 0 and 1.
     if (warpId == 0) {
-        // Load K
-        asyncBufferLoad<KTileSize>(
-            K, smemK[0],
-            0, thread, KFragmentSize, pipeK
-        );
+        asyncBufferLoad<KTileSize>(K, smemK[0], 0, thread, KFragmentSize, pipeK);
     } else if (warpId == 1) {
-        // Load V
-        asyncBufferLoad<KTileSize>(
-            V, smemV[0],
-            0, thread, KFragmentSize, pipeV
-        );
+        asyncBufferLoad<KTileSize>(V, smemV[0], 0, thread, KFragmentSize, pipeV);
     } else {
-        // Load Q tile
-        loadQRegisters<DHEAD, BLOCK_Q_ROWS, ROWS_PER_WARP>(
-            Q, QFrag,
-            blockIdx.z * strideBatchQ, blockIdx.y * strideHeadQ,
-            warpId, thread, QFragmentSize
-        );
+        loadQRegisters<DHEAD, BLOCK_Q_ROWS, ROWS_PER_WARP>(Q, QFrag, blockIdx.z * strideBatchQ, blockIdx.y * strideHeadQ, warpId, thread, QFragmentSize);
     }
     __syncthreads();
     int buf = 0;
+    int qIdx = blockIdx.x * BLOCK_Q_ROWS + thread * ROWS_PER_WARP / WARP;
     for (int kvtile = BLOCK_KV_ROWS; kvtile < seqLenK; kvtile += BLOCK_KV_ROWS) {
-        int nextBuf ^= 1;
+        int nextBuf = buf ^ 1;
 
         // Call async loading first.
         if (kvtile < numTiles - 1) {
             if (warpId == 0) asyncBufferLoad<KTileSize>(K, smemK[nextBuf], (kvtile+1)*BLOCK_KV_ROWS, thread, KFragmentSize, pipeK);
             if (warpId == 1) asyncBufferLoad<KTileSize>(V, smemV[nextBuf], (kvtile+1)*BLOCK_KV_ROWS, thread, KFragmentSize, pipeV);
-        }
-        
+        } 
         if (warpId >= 2) {
             pipeK.consumer_wait();
             // Mask: 32 bit int where each bit represents which threads are broadcasted to in the warp.
             // mask is created by creating number of consecutive ones at back for threads listening and then pushes it back however many times as necessary.
             unsigned mask = ((1u << WARP / ROWS_PER_WARP) - 1) << (((thread * ROWS_PER_WARP) / WARP) * WARP / ROWS_PER_WARP);
             for (int kvRow = 0; kvRow < BLOCK_KV_ROWS; ++kvRow) {
-                const float* kRowPtr = &smemK[buf][kvRow * D_HEAD + thread * QFragmentSize]; // QFragmentSize bc is equal due to being along d_head.
-                float partialDotProduct = 0.0f;
+                float score;
+                if (kvtile * BLOCK_KV_ROWS + kvRow > qIdx) {
+                    score = -INFINITY;
+                } else {
+                    float dotPartialProduct = 0.0f;
+                    const float* kRowPtr = &smemK[buf][kvRow * D_HEAD + thread * QFragmentSize]; // QFragmentSize bc is equal due to being along d_head.
 
-                #pragma unroll
-                for (int i = 0; i < QFragmentSize; i++) {
-                    partialDotProduct += QFrag[i] * kRowPtr[i];
-                }
-
+                    #pragma unroll
+                    for (int i = 0; i < QFragmentSize; i++) {
+                        dotPartialProduct += QFrag[i] * kRowPtr[i];
+                    }
                 
+                    // Warp reduce into first thread for each row.
+                    score = cg::reduce(rowGroup, dotPartialProduct, cg::plus<float>()) * scale;
+                }
+                // Softmax Calculation updates (only first thread in subgroup does this).
+                if (rowGroup.thread_rank() == 0) {
+                    float newM = fmaxf(smemM[], score);
+                    float expNew = expf(mWarp - newM);
+                    float expOld = expNew * lWarp;
+                    float newL = expOld + expNew;
+                    float oldScale = expOld / newL;
+                    float newScale = expNew / newL;
+                }
             }
         }
+        buf = nextBuf;
     }
 }
