@@ -73,19 +73,35 @@ __device__ __forceinline__ void loadQRegisters(const float* __restrict__ Q, floa
 
 
 template<int TILE_SIZE>
-__device__ __forceinline__ void asyncBufferLoad(const float* __restrict__ matrix, float* __restrict__ matrixSmem, int tileOffset, int thread, int fragmentSize, pipe_t& pipe) {
-    if (thread == 0) pipe.producer_acquire();
-    // Change this to iterate through the chunks
-    int base = tileOffset + thread * fragmentSize;
+__device__ __forceinline__ void asyncBufferLoad(const float* __restrict__ matrix, float* __restrict__ matrixSmem, int tileOffset, int laneId, int fragmentSize, pipe_t& pipe) {
+    if (!laneId) pipe.producer_acquire();
+    int base = tileOffset + laneId * fragmentSize;
     #pragma unroll
-    for (int reads = 0; reads < fragmentSize / 4; ++reads) {
-        if (thread * fragmentSize <= TILE_SIZE) {
-            const float4* globalMemPtr = reinterpret_cast<const float4*>(matrix + base + reads * 4);
-            float4* smemPtr = reinterpret_cast<float4*>(matrixSmem + base + reads * 4);
-            cuda::memcpy_async(pipe, smemPtr, globalMemPtr, sizeof(float4));
+    for (int reads = 0; reads < fragmentSize; reads += 4) {
+        int writes = std::min(fragmentSize - reads, 4);
+        if (writes == 4) {
+            const float4* gloablMemPtr = reinterpret_cast<const float4*>(matrix + base + reads);
+            float4* smemPtr = reinterpret_cast<float4*>(matrixSmem + laneId * fragmentSize + reads);
+            cuda::memcpy_async(pipe, smemPtr, gloablMemPtr, sizeof(float4));
+        } else if (writes == 3) {
+            const float2* gloablMemPtr2 = reinterpret_cast<const float2*>(matrix + base + reads);
+            float2* smemPtr2 = reinterpret_cast<float2*>(matrixSmem + laneId * fragmentSize + reads);
+            cuda::memcpy_async(pipe, smemPtr2, gloablMemPtr2, sizeof(float2));
+
+            const float gloablMemPtr = reinterpret_cast<const float*>(matrix + base + reads + sizeof(float2));
+            float* smemPtr = reinterpret_cast<float*>(matrixSmem + laneId * fragmentSize + reads + sizeof(float2));
+            cuda::memcpy_async(pipe, smemPtr, gloablMemPtr, sizeof(float));
+        } else if (writes == 2) {
+            const float2* gloablMemPtr = reinterpret_cast<const float2*>(matrix + base + reads);
+            float2* smemPtr = reinterpret_cast<float2*>(matrixSmem + laneId * fragmentSize + reads);
+            cuda::memcpy_async(pipe, smemPtr, gloablMemPtr, sizeof(float2));
+        } else {
+            const float gloablMemPtr = reinterpret_cast<const float*>(matrix + base + reads);
+            float* smemPtr = reinterpret_cast<float*>(matrixSmem + laneId * fragmentSize + reads);
+            cuda::memcpy_async(pipe, smemPtr, gloablMemPtr, sizeof(float));
         }
     }
-    if (!thread) pipe.producer_commit();
+    if (!laneId) pipe.producer_commit();
 }
 
 
