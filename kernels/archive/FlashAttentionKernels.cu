@@ -13,6 +13,7 @@ namespace cg = cooperative_groups;
 
 using pipe_t = cuda::pipeline<cuda::thread_scope_block>;
 
+__shared__ pipe_t pipeQ;
 __shared__ pipe_t pipeK;
 __shared__ pipe_t pipeV;
 
@@ -105,6 +106,7 @@ __device__ __forceinline__ void asyncBufferLoad(const float* __restrict__ matrix
 }
 
 
+// Kernel that uses only 1 warp for loading from HBM into SRAM (High compute)
 template<int DHEAD, int BLOCK_Q_ROWS, int BLOCK_KV_ROWS, int ROWS_PER_WARP>
 __global__ void causalFlashAttention2(
     const float* __restrict__ Q, const float* __restrict__ K, const float* __restrict__ V,
@@ -114,40 +116,44 @@ __global__ void causalFlashAttention2(
     int strideBatchQ, int strideBatchK, int strideBatchV, int strideBatchO,
     int strideHeadQ, int strideHeadK, int strideHeadV, int strideHeadO,
     float scale, 
-    int BLOCK_KV_ROWS
+    int BLOCK_KV_ROWS, bool is_causal
 )
 {
     extern __shared__ float smem[];
     int warpId = threadIdx.x / WARP;
     int laneId = threadIdx.x % WARP;
     // Split off loader warps
-    if (warpId == 0 || warpId == 1) {
+    if (warpId == 0) {
+        constexpr int QTileSize = DHEAD * BLOCK_Q_ROWS;
+        constexpr int QFragmentSize = QTileSize / WARP;
         constexpr int KTileSize = DHEAD * BLOCK_KV_ROWS;
         constexpr int KFragmentSize = KTileSize / WARP;
 
         // Instantiate pipes
         if (laneId == 0) {
-            new (&pipeK) pipe_t();
+            new (&pipeQ) pipe_t();
         } else if (laneId == 1) {
+            new (&pipeK) pipe_t();
+        } else if (laneId == 2) {
             new (&pipeV) pipe_t();
         }
         // Set smem pointers
+        float* smemQ[2];
         float* smemK[2];
         float* smemV[2];
-        setLoaderSmemPointers(smemK, smemV, KTileSize, BLOCK_KV_ROWS);
-        // Preload first K and V tiles while Q is being loaded into registers
-        if (warpId == 0) {
-            asyncBufferLoad<KTileSize>(K, smemK[0], 0, laneId, KFragmentSize, pipeK);
-        } else {
-            asyncBufferLoad<KTileSize>(V, smemV[0], 0, laneId, KFragmentSize, pipeV);
-        }
+        setLoaderSmemPointers(smemQ, smemK, smemV, KTileSize, BLOCK_Q_ROWS, BLOCK_KV_ROWS);
+
         // Iteratively load the tiles
         int buf = 0;
-        for(int loadingOffset = BLOCK_KV_ROWS; loadingOffset < seqLenK; loadingOffset += BLOCK_KV_ROWS) {
-            buf ^= 1;
-            if(warpId == 0) asyncBufferLoad<KTileSize>(K, smemK[buf], loadingOffset, laneId, KFragmentSize, pipeK);
-            else asyncBufferLoad<KTileSize>(V, smemV[buf], loadingOffset, laneId, KFragmentSize, pipeV);
-            __syncthreads();
+        
+        for (int loadingOffsetQ = 0; loadingOffsetQ < seqLenQ; loadingOffsetQ += BLOCK_Q_ROWS) {
+            asyncBufferLoad<QTileSize>(Q, smemQ[buf], loadingOffset, laneId, QFragmentSize, pipeQ);
+            for(int loadingOffsetKV = 0; loadingOffsetKV < seqLenK; loadingOffsetKV += BLOCK_KV_ROWS) {
+                asyncBufferLoad<KTileSize>(K, smemK[buf], loadingOffsetKV, laneId, KFragmentSize, pipeK);
+                asyncBufferLoad<KTileSize>(V, smemV[buf], loadingOffsetKV, laneId, KFragmentSize, pipeV);
+                buf ^= 1;
+                __syncthreads();
+            }
         }
     } else {
         constexpr int QTileSize = DHEAD * BLOCK_Q_ROWS;
@@ -159,14 +165,14 @@ __global__ void causalFlashAttention2(
         auto rowGroup = cg::tiled_partition<WARP / ROWS_PER_WARP>(warp);
 
         // Set smem pointers needed for calculations
+        float* smemQ[2];
         float* smemK[2];
         float* smemV[2];
-        float* smemO;
         float* smemL;
         float* smemM;
         float QFrag[QFragmentSize];
         float OFrag[QFragmentSize];
-        setCalculatorSmemPointers(smemK, smemV, smemO, smemL, smemM, KTileSize, QTileSize, BLOCK_Q_ROWS);
+        setCalculatorSmemPointers(smemQ, smemK, smemV, smemL, smemM, KTileSize, QTileSize, BLOCK_Q_ROWS);
 
         // Load Q into registers
         loadQRegisters<DHEAD, BLOCK_Q_ROWS, ROWS_PER_WARP>(Q, QFrag, blockIdx.z * strideBatchQ, blockIdx.y * strideHeadQ, warpId, laneId, QFragmentSize);
@@ -207,12 +213,7 @@ __global__ void causalFlashAttention2(
                     OFrag[i] = score * vRowPtr[i];
                 }
 
-                // Broadcast out to rowGroup leader.
-                for (int i = 0; i < QFragmentSize; i++) {
-                    
-                }
-
-                // Update O.
+                // Update corresponding section of O
                 if (!rowGroup.thread_rank()) {
                     float* oRowPtr = &output[qIdx * D_HEAD]
                 }
@@ -221,3 +222,10 @@ __global__ void causalFlashAttention2(
         }
     }
 }
+
+// Kernel that uses 2 warps for loading from HBM into SRAM 
+// Warp 0 does Q and then V.
+// Warp 1 does K and then O
+
+// Kernel that uses 3 warps for loading from HBM into SRAM
+// Warps 0-2 do Q and O, K, V respectively.

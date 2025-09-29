@@ -25,7 +25,9 @@ void check_gpu_props() {
     printf("Max threads per SM: %d\n", maxThreadsPerSM);
 }
 
+
+
 int main() {
-    check_gpu_props();
+    
     return 0;
 }
