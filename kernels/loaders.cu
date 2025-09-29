@@ -1,11 +1,13 @@
 #include "loaders.cuh"
 
-using pipe_t = cuda::pipeline<cuda::thread_scope_block>;
 
-
-__device__ __forceinline__ void setOneLoaderSmemPointers(float* __restrict__ (&smemK)[2], float* __restrict__ (&smemV)[2], int kvElements) {
+__device__ __forceinline__ void oneLoaderSetSmemPointers(float* __restrict__ (&smemQ)[2], float* __restrict__ (&smemK)[2], float* __restrict__ (&smemV)[2], int qElements, int kvElements) {
     extern __shared__ float smem[];
     int offset=0;
+    smemQ[0] = smem;
+    offset += qElements;
+    smemQ[1] = smem + offset;
+    offset += qElements;
     smemK[0] = smem + offset;
     offset += kvElements;
     smemK[1] = smem + offset;
@@ -16,45 +18,12 @@ __device__ __forceinline__ void setOneLoaderSmemPointers(float* __restrict__ (&s
 }
 
 
-__device__ __forceinline__ void setOneCalculatorSmemPointers(float* __restrict__ &O, float* __restrict__ &L, float* __restrict__ &M, int kvElements, int qElements, int BLOCK_Q_ROWS) {
+__device__ __forceinline__ void oneLoaderSetCalculatorAdditionalSmemPointers(float* __restrict__ &L, float* __restrict__ &M, int qElements, int kvElements, int BLOCK_Q_ROWS) {
     extern __shared__ float smem[];
-    int offset=kvElements*4;
-    O = smem + offset;
-    offset += qElements;
+    int offset=qElements * 2 + kvElements*4;
     L = smem + offset;
     offset += BLOCK_Q_ROWS;
     M = smem + offset;
-}
-
-
-template<int DHEAD, int BLOCK_Q_ROWS, int ROWS_PER_WARP>
-__device__ __forceinline__ void loadQRegisters(const float* __restrict__ Q, float* __restrict__ QFrag, int batch, int head, int warpId, auto laneId, int fragmentSize) {
-    // tile_start = Q + blockIdx.z * strideBatchQ + blockIdx.y * strideHeadQ + blockIdx.x * BLOCK_Q_ROWS;
-    const float* fragmentStart = Q + blockIdx.z * strideBatchQ + blockIdx.y * strideHeadQ + blockIdx.x * BLOCK_Q_ROWS + warpId * ROWS_PER_WARP * DHEAD + laneId * fragmentSize;
-    // Do reads of float4 if possible and only save what's necessary
-    #pragma unroll
-    for (int reads = 0; reads < fragmentSize; reads += 4) {
-        int writes = std::mid(fragmentSize - reads, 4);
-        if (writes == 4) {
-            float4 frag = *((const float4*)(fragmentStart + reads));
-            QFrag[reads] = frag.x;
-            QFrag[reads + 1] = frag.y;
-            QFrag[reads + 2] = frag.z;
-            QFrag[reads + 3] = frag.w;
-        } else if (writes == 3) {
-            // Not 8 or 16 bit aligned so have to do with reads of float and float2
-            float2 frag = *((const float2*)(fragmentStart + reads));
-            QFrag[reads] = frag.x;
-            QFrag[reads + 1] = frag.y;
-            QFrag[reads + 2] = *(fragmentStart + reads + 2);
-        } else if (writes == 2) {
-            float2 frag = *((const float2*)(fragmentStart + reads));
-            QFrag[reads] = frag.x;
-            QFrag[reads + 1] = frag.y;
-        } else {
-            QFrag[reads] = *(fragmentStart + reads);
-        }
-    }
 }
 
 
@@ -90,4 +59,34 @@ __device__ __forceinline__ void asyncBufferLoad(const float* __restrict__ matrix
     if (!laneId) pipe.producer_commit();
 }
 
+
+template<int DHEAD, int BLOCK_Q_ROWS, int ROWS_PER_WARP>
+__device__ __forceinline__ void loadQRegisters(const float* __restrict__ Q, float* __restrict__ QFrag, int batch, int head, int warpId, auto laneId, int fragmentSize) {
+    // tile_start = Q + blockIdx.z * strideBatchQ + blockIdx.y * strideHeadQ + blockIdx.x * BLOCK_Q_ROWS;
+    const float* fragmentStart = Q + blockIdx.z * strideBatchQ + blockIdx.y * strideHeadQ + blockIdx.x * BLOCK_Q_ROWS + warpId * ROWS_PER_WARP * DHEAD + laneId * fragmentSize;
+    // Do reads of float4 if possible and only save what's necessary
+    #pragma unroll
+    for (int reads = 0; reads < fragmentSize; reads += 4) {
+        int writes = std::mid(fragmentSize - reads, 4);
+        if (writes == 4) {
+            float4 frag = *((const float4*)(fragmentStart + reads));
+            QFrag[reads] = frag.x;
+            QFrag[reads + 1] = frag.y;
+            QFrag[reads + 2] = frag.z;
+            QFrag[reads + 3] = frag.w;
+        } else if (writes == 3) {
+            // Not 8 or 16 bit aligned so have to do with reads of float and float2
+            float2 frag = *((const float2*)(fragmentStart + reads));
+            QFrag[reads] = frag.x;
+            QFrag[reads + 1] = frag.y;
+            QFrag[reads + 2] = *(fragmentStart + reads + 2);
+        } else if (writes == 2) {
+            float2 frag = *((const float2*)(fragmentStart + reads));
+            QFrag[reads] = frag.x;
+            QFrag[reads + 1] = frag.y;
+        } else {
+            QFrag[reads] = *(fragmentStart + reads);
+        }
+    }
+}
 
