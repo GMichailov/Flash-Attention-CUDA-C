@@ -1,7 +1,7 @@
 #pragma once
 
-#include "utils.cuh"
 #include "loaders.cuh"
+#include "computers.cuh"
 
 #include <cuda.h>
 #include <cuda_runtime.h>
@@ -15,12 +15,6 @@ namespace cg = cooperative_groups;
 
 #define WARP 32
 #define FLOAT_SIZE 4
-
-using pipe_t = cuda::pipeline<cuda::thread_scope_block>;
-
-__shared__ pipe_t pipeQ;
-__shared__ pipe_t pipeK;
-__shared__ pipe_t pipeV;
 
 
 // Kernel that uses only 1 warp for loading from HBM into SRAM (High compute needs so maybe for FP32)

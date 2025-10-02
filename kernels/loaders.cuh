@@ -1,11 +1,6 @@
 #pragma once
 
-#include <cuda_runtime.h>
-#include <cuda.h>
-#include <cuda/pipeline>
-#include <cuda_runtime_api.h>
-
-using pipe_t = cuda::pipeline<cuda::thread_scope_block>;
+#include "utils.cuh"
 
 
 __device__ __forceinline__ void oneLoaderSetSmemPointers(float* __restrict__ (&smemQ)[2], float* __restrict__ (&smemK)[2], float* __restrict__ (&smemV)[2], int qElements, int kvElements) {
@@ -66,3 +61,30 @@ __device__ __forceinline__ void asyncBufferLoad(const float* __restrict__ matrix
     pipe.producer_commit();
 }
 
+
+template<int DHEAD, int BLOCK_Q_ROWS, int BLOCK_KV_ROWS, int ROWS_PER_WARP>
+__device__ __forceinline__ void singleLoaderWarp(float* __restrict__ (&smem)[2], pipe_t pipeQ, pipe_t pipeK, pipe_t pipeV, auto block, int laneId) {
+    constexpr int QTileSize = DHEAD * BLOCK_Q_ROWS;
+    constexpr int QFragmentSize = QTileSize / WARP;
+    constexpr int KTileSize = DHEAD * BLOCK_KV_ROWS;
+    constexpr int KFragmentSize = KTileSize / WARP;
+
+    // Set smem pointers
+    float* smemQ[2];
+    float* smemK[2];
+    float* smemV[2];
+    setLoaderSmemPointers(smemQ, smemK, smemV, KTileSize, BLOCK_Q_ROWS, BLOCK_KV_ROWS);
+
+    // Iteratively load the tiles
+    int buf = 0;
+    for (int loadingOffsetQ = 0; loadingOffsetQ < seqLenQ; loadingOffsetQ += BLOCK_Q_ROWS) {
+        asyncBufferLoad<QTileSize>(Q, smemQ[buf], loadingOffsetQ, laneId, QFragmentSize, pipeQ);
+        for(int loadingOffsetKV = 0; loadingOffsetKV < seqLenK; loadingOffsetKV += BLOCK_KV_ROWS) {
+            asyncBufferLoad<KTileSize>(K, smemK[buf], loadingOffsetKV, laneId, KFragmentSize, pipeK);
+            asyncBufferLoad<KTileSize>(V, smemV[buf], loadingOffsetKV, laneId, KFragmentSize, pipeV);
+            buf ^= 1;
+            // Wait for computation warps to finish calculating on the other buffer.
+            __syncthreads();
+        }
+    }
+}
