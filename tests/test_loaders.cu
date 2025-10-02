@@ -1,4 +1,4 @@
-#include "loaders.cuh"
+#include "../kernels/loaders.cuh"
 #include <cstdio>
 #include <cooperative_groups.h>
 
