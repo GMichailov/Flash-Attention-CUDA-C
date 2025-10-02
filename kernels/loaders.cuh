@@ -36,11 +36,11 @@ __device__ __forceinline__ void oneLoaderSetCalculatorAdditionalSmemPointers(flo
 
 template<int TILE_SIZE>
 __device__ __forceinline__ void asyncBufferLoad(const float* __restrict__ matrix, float* __restrict__ matrixSmem, int tileOffset, int laneId, int fragmentSize, pipe_t& pipe) {
-    if (!laneId) pipe.producer_acquire();
+    pipe.producer_acquire();
     int base = tileOffset + laneId * fragmentSize;
     #pragma unroll
     for (int reads = 0; reads < fragmentSize; reads += 4) {
-        int writes = std::min(fragmentSize - reads, 4);
+        int writes = min(fragmentSize - reads, 4);
         if (writes == 4) {
             const float4* gloablMemPtr = reinterpret_cast<const float4*>(matrix + base + reads);
             float4* smemPtr = reinterpret_cast<float4*>(matrixSmem + laneId * fragmentSize + reads);
@@ -63,6 +63,6 @@ __device__ __forceinline__ void asyncBufferLoad(const float* __restrict__ matrix
             cuda::memcpy_async(smemPtr, gloablMemPtr, sizeof(float), pipe);
         }
     }
-    if (!laneId) pipe.producer_commit();
+    pipe.producer_commit();
 }
 
