@@ -3,7 +3,7 @@
 // Kernel that uses only 1 warp for loading from HBM into SRAM (High compute)
 template<int DHEAD, int BLOCK_Q_ROWS, int BLOCK_KV_ROWS, int ROWS_PER_WARP>
 __global__ void oneLoaderMhaFlashAttentionKernel(
-    const float* __restrict__ Q, const float* __restrict__ K, const float* __restrict__ V,
+    const float* __restrict__ Q, const float* __restrict__ K, const float* __restrict__ V, float* __restrict__ O,
     const float* __restrict__ L, const float* __restrict__ M,
     int batchSize, int numHeads,
     int seqLenQ, int seqLenK,

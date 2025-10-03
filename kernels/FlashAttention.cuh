@@ -11,16 +11,11 @@
 #include <cuda/pipeline>
 #include <cooperative_groups.h>
 
-namespace cg = cooperative_groups;
-
-#define WARP 32
-#define FLOAT_SIZE 4
-
 
 // Kernel that uses only 1 warp for loading from HBM into SRAM (High compute needs so maybe for FP32)
 template<int DHEAD, int BLOCK_Q_ROWS, int BLOCK_KV_ROWS, int ROWS_PER_WARP>
 __global__ void oneLoaderMhaFlashAttentionKernel(
-    const float* __restrict__ Q, const float* __restrict__ K, const float* __restrict__ V,
+    const float* __restrict__ Q, const float* __restrict__ K, const float* __restrict__ V, float* __restrict__ O,
     const float* __restrict__ L, const float* __restrict__ M,
     int batchSize, int numHeads,
     int seqLenQ, int seqLenK,
