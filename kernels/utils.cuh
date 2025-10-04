@@ -4,6 +4,7 @@
 #include <cuda.h>
 #include <cuda/pipeline>
 #include <cuda_runtime_api.h>
+#include <cooperative_groups.h>
 
 namespace cg = cooperative_groups;
 
@@ -32,24 +33,36 @@ __global__ __forceinline__ int computeRowNoncausalAttentionScore(
 
 __global__ __forceinline__ void rowSoftmax(
     float* __restrict__ smemM, float* __restrict__ smemL, 
-    int qIdx, float score
+    int qRow, float score, float& newMax, float& newL
 ) {
-    float newMax = fmaxf(smemM[qIdx], score);
-    smemL[qIdx] = (smemL[qIdx] + 1) * expf(smemM[qIdx] - newMax);
-    smemM[qIdx] = newMax;
+    newMax = fmaxf(smemM[qRow], score);
+    newL = smemL[qRow] * expf(smemM[qRow] - newMax) + expf(score - newMax);
 }
 
 
 template<int ROWS_PER_WARP>
 __global__ __forceinline__ void multiplyVStoreO(
-    const float* vRowPtr, const float* oRowPtr, float* OFrag, float score,
-    int QFragmentSize,
+    float* __restrict__ smemV, float* __restrict__ O, float* __restrict__ OFrag,
+    float* __restrict__ smemL, float* __restrict__ smemM, 
+    int QFragmentSize, int qIdx, int qRow, int kvRow, const float& score,
+    const float& newMax, const float& newL,
     cg::thread_block_tile<WARP / ROWS_PER_WARP>& rowGroup
 ) {
-    // Calculate V and O row ptrs here.
-    // Scale with softmax trick.
+    float* vPtr = &smemV[kvRow + rowGroup.thread_rank() * QFragmentSize];
+    float* oPtr = O[qIdx];
+    float weight = expf(score - newMax) / newL;
+    float rescale = smemL[qRow] * expf(smemM[qRow] - newMax) / newL;
     #pragma unroll
     for(int i = 0; i < QFragmentSize; ++i) {
-        oRowPtr[i] = score * vRowPtr[i];
+        oPtr[i] = oPtr[i] * rescale + weight * vPtr[i];
     }
 }
+
+__global__ __forceinline__ void updateML(
+    float* __restrict__ smemL, float* __restrict__ smemM,
+    int qRow, const float& newL, const float& newMax
+) {
+    smemL[qRow] = newL;
+    smemM[qRow] = newMax;
+}
+
