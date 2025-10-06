@@ -24,8 +24,11 @@ __device__ __forceinline__ void singleLoaderMhaComputeWarp(float* __restrict__ (
     oneLoaderSetCalculatorAdditionalSmemPointers(smemL, smemM, QTileSize * BLOCK_Q_ROWS, KTileSize * BLOCK_KV_ROWS, BLOCK_Q_ROWS);
 
     int buf = 0;
+    // Verify Correctness of qIdx.
     int qIdx = blockIdx.x * BLOCK_Q_ROWS + laneId * ROWS_PER_WARP / WARP;
     float score;
+    float newMax;
+    float newL;
     int kvRow = warp.thread_rank() / (WARP / ROWS_PER_WARP);
     for (int kvtile = BLOCK_KV_ROWS; kvtile < seqLenK; kvtile += BLOCK_KV_ROWS) {
         pipeK.consumer_wait();
@@ -35,27 +38,15 @@ __device__ __forceinline__ void singleLoaderMhaComputeWarp(float* __restrict__ (
         } else {
             computeRowNoncausalAttentionScore<ROWS_PER_WARP>(QFrag, smemK[buf], kvRow, laneId, scale, D_HEAD, QFragmentSize, rowGroup);
         }
-        // Have only first thread in each subgroup do the softmax updates.
         if (!rowGroup.thread_rank()) {
-            rowSoftmax(&smemM, &smemL, qIdx, score);
+            // Pass correct Q row.
+            rowSoftmax(&smemM, &smemL, , score, newMax, newL);
         }
+        newMax = rowGroup.shfl(newMax, 0);
+        newL = rowGroup.shfl(newL, 0);
         rowGroup.sync();
-
-        pipeV.consumer_wait(); // I suspect this line with cause issues.
-        /*
-        const float* vRowPtr = &smemV[buf][kvRow + rowGroup.thread_rank() * QFragmentSize];
-        #pragma unroll
-        for (int i = 0; i < QFragmentSize; i++) {
-            OFrag[i] = score * vRowPtr[i];
-        }
-
-        // Update corresponding section of O
-        if (!rowGroup.thread_rank()) {
-            float* oRowPtr = &output[qIdx * D_HEAD]
-        }*/
-
-        multiplyVStoreO(); // Fix header tomorrow.
-        
+        pipeV.consumer_wait();
+        multiplyVStoreO();
         buf ^= 1;
     }
 }
