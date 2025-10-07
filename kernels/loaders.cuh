@@ -68,9 +68,7 @@ __device__ __forceinline__ void singleLoaderWarp(
     pipe_t pipeQ, pipe_t pipeK, pipe_t pipeV, 
     auto block, int laneId,
     int batchSize, int numHeads,
-    int seqLenQ, int seqLenK,
-    int strideBatchQ, int strideBatchK, int strideBatchV, int strideBatchO,
-    int strideHeadQ, int strideHeadK, int strideHeadV, int strideHeadO
+    int seqLenQ, int seqLenK
 ) {
     constexpr int QTileSize = DHEAD * BLOCK_Q_ROWS;
     constexpr int QFragmentSize = QTileSize / WARP;
