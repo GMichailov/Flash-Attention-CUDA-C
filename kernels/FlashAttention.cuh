@@ -1,5 +1,6 @@
 #pragma once
 
+#include "utils.cuh"
 #include "loaders.cuh"
 #include "computers.cuh"
 
