@@ -13,18 +13,19 @@ namespace cg = cooperative_groups;
 
 using pipe_t = cuda::pipeline<cuda::thread_scope_block>;
 
-template<int ROWS_PER_WARP>
+template<int ROWS_PER_WARP, int D_HEAD>
 __global__ __forceinline__ int computeRowNoncausalAttentionScore(
-    const float* QFrag, const float* smemKBuf,
-    int kvrow, int laneId, float scale, int D_HEAD, int QFragmentSize,
+    const float* smemQBuf, const float* smemKBuf,
+    int relativeQRow, int relativeKvRow, float scale, int QFragmentSize,
     cg::thread_block_tile<WARP / ROWS_PER_WARP>& rowGroup
 ) {
     float partialDotProduct = 0.0f;
     // QFragmentSize bc is equal due to being along d_head for both.
-    const float* kRowPtr = &smemK[buf][kvRow * D_HEAD + laneId * QFragmentSize];
+    const float* qRowPtr = &smemQBuf[relativeQRow * D_HEAD + rowGroup.thread_rank() * QFragmentSize];
+    const float* kRowPtr = &smemKBuf[relativeKvRow * D_HEAD + rowGroup.thread_rank() * QFragmentSize];
     #pragma unroll
     for (int i = 0; i < QFragmentSize; i++) {
-        partialDotProduct += QFrag[i] * kRowPtr[i];
+        partialDotProduct += qRowPtr[i] * kRowPtr[i];
     }
     float score = cg::reduce(rowGroup, partialDotProduct, cg::plus<float>()) * scale;
     return score;
