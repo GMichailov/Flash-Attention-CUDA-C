@@ -63,7 +63,15 @@ __device__ __forceinline__ void asyncBufferLoad(const float* __restrict__ matrix
 
 
 template<int DHEAD, int BLOCK_Q_ROWS, int BLOCK_KV_ROWS, int ROWS_PER_WARP>
-__device__ __forceinline__ void singleLoaderWarp(float* __restrict__ (&smem)[2], pipe_t pipeQ, pipe_t pipeK, pipe_t pipeV, auto block, int laneId) {
+__device__ __forceinline__ void singleLoaderWarp(
+    float* __restrict__ (&smem)[2], 
+    pipe_t pipeQ, pipe_t pipeK, pipe_t pipeV, 
+    auto block, int laneId,
+    int batchSize, int numHeads,
+    int seqLenQ, int seqLenK,
+    int strideBatchQ, int strideBatchK, int strideBatchV, int strideBatchO,
+    int strideHeadQ, int strideHeadK, int strideHeadV, int strideHeadO
+) {
     constexpr int QTileSize = DHEAD * BLOCK_Q_ROWS;
     constexpr int QFragmentSize = QTileSize / WARP;
     constexpr int KTileSize = DHEAD * BLOCK_KV_ROWS;
@@ -77,9 +85,9 @@ __device__ __forceinline__ void singleLoaderWarp(float* __restrict__ (&smem)[2],
 
     // Iteratively load the tiles
     int buf = 0;
-    for (int loadingOffsetQ = 0; loadingOffsetQ < seqLenQ; loadingOffsetQ += BLOCK_Q_ROWS) {
+    for (int loadingOffsetQ = 0; loadingOffsetQ < seqLenQ * batchSize * numHeads; loadingOffsetQ += BLOCK_Q_ROWS) {
         asyncBufferLoad<QTileSize>(Q, smemQ[buf], loadingOffsetQ, laneId, QFragmentSize, pipeQ);
-        for(int loadingOffsetKV = 0; loadingOffsetKV < seqLenK; loadingOffsetKV += BLOCK_KV_ROWS) {
+        for(int loadingOffsetKV = 0; loadingOffsetKV < seqLenK * batchSize * numHeads; loadingOffsetKV += BLOCK_KV_ROWS) {
             asyncBufferLoad<KTileSize>(K, smemK[buf], loadingOffsetKV, laneId, KFragmentSize, pipeK);
             asyncBufferLoad<KTileSize>(V, smemV[buf], loadingOffsetKV, laneId, KFragmentSize, pipeV);
             buf ^= 1;
