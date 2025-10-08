@@ -16,15 +16,15 @@ using pipe_t = cuda::pipeline<cuda::thread_scope_block>;
 template<int ROWS_PER_WARP, int D_HEAD>
 __global__ __forceinline__ int computeRowNoncausalAttentionScore(
     const float* smemQBuf, const float* smemKBuf,
-    int relativeQRow, int relativeKvRow, float scale, int QFragmentSize,
+    int relativeRow, float scale, int fragmentSize,
     cg::thread_block_tile<WARP / ROWS_PER_WARP>& rowGroup
 ) {
     float partialDotProduct = 0.0f;
-    // QFragmentSize bc is equal due to being along d_head for both.
-    const float* qRowPtr = &smemQBuf[relativeQRow * D_HEAD + rowGroup.thread_rank() * QFragmentSize];
-    const float* kRowPtr = &smemKBuf[relativeKvRow * D_HEAD + rowGroup.thread_rank() * QFragmentSize];
+    int idx = relativeRow * D_HEAD + rowGroup.thread_rank() * fragmentSize;
+    const float* qRowPtr = &smemQBuf[idx];
+    const float* kRowPtr = &smemKBuf[idx];
     #pragma unroll
-    for (int i = 0; i < QFragmentSize; i++) {
+    for (int i = 0; i < fragmentSize; i++) {
         partialDotProduct += qRowPtr[i] * kRowPtr[i];
     }
     float score = cg::reduce(rowGroup, partialDotProduct, cg::plus<float>()) * scale;

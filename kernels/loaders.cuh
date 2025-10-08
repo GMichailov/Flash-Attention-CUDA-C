@@ -3,28 +3,28 @@
 #include "utils.cuh"
 
 
-__device__ __forceinline__ void oneLoaderSetSmemPointers(float* __restrict__ (&smemQ)[2], float* __restrict__ (&smemK)[2], float* __restrict__ (&smemV)[2], int qElements, int kvElements) {
+__device__ __forceinline__ void oneLoaderSetSmemPointers(float* __restrict__ (&smemQ)[2], float* __restrict__ (&smemK)[2], float* __restrict__ (&smemV)[2], int matrixElements) {
     extern __shared__ float smem[];
     int offset=0;
     smemQ[0] = smem;
-    offset += qElements;
+    offset += matrixElements;
     smemQ[1] = smem + offset;
-    offset += qElements;
+    offset += matrixElements;
     smemK[0] = smem + offset;
-    offset += kvElements;
+    offset += matrixElements;
     smemK[1] = smem + offset;
-    offset += kvElements;
+    offset += matrixElements;
     smemV[0] = smem + offset;
-    offset += kvElements;
+    offset += matrixElements;
     smemV[1] = smem + offset;
 }
 
 
-__device__ __forceinline__ void oneLoaderSetCalculatorAdditionalSmemPointers(float* __restrict__ &L, float* __restrict__ &M, int qElements, int kvElements, int BLOCK_Q_ROWS) {
+__device__ __forceinline__ void oneLoaderSetCalculatorAdditionalSmemPointers(float* __restrict__ &L, float* __restrict__ &M, int matrixElements, int BLOCK_ROWS) {
     extern __shared__ float smem[];
-    int offset=qElements * 2 + kvElements*4;
+    int offset=matrixElements * 6;
     L = smem + offset;
-    offset += BLOCK_Q_ROWS;
+    offset += BLOCK_ROWS;
     M = smem + offset;
 }
 
@@ -62,7 +62,7 @@ __device__ __forceinline__ void asyncBufferLoad(const float* __restrict__ matrix
 }
 
 
-template<int DHEAD, int BLOCK_Q_ROWS, int BLOCK_KV_ROWS, int ROWS_PER_WARP>
+template<int D_HEAD, int BLOCK_ROWS, int ROWS_PER_WARP>
 __device__ __forceinline__ void singleLoaderWarp(
     float* __restrict__ (&smem)[2], 
     pipe_t pipeQ, pipe_t pipeK, pipe_t pipeV, 
@@ -70,24 +70,22 @@ __device__ __forceinline__ void singleLoaderWarp(
     int batchSize, int numHeads,
     int seqLenQ, int seqLenK
 ) {
-    constexpr int QTileSize = DHEAD * BLOCK_Q_ROWS;
-    constexpr int QFragmentSize = QTileSize / WARP;
-    constexpr int KTileSize = DHEAD * BLOCK_KV_ROWS;
-    constexpr int KFragmentSize = KTileSize / WARP;
+    constexpr int tileSize = D_HEAD * BLOCK_ROWS;
+    constexpr int fragmentSize = D_HEAD / (WARP / ROWS_PER_WARP);
 
     // Set smem pointers
     float* smemQ[2];
     float* smemK[2];
     float* smemV[2];
-    setLoaderSmemPointers(smemQ, smemK, smemV, KTileSize, BLOCK_Q_ROWS, BLOCK_KV_ROWS);
+    setLoaderSmemPointers(smemQ, smemK, smemV, tileSize);
 
     // Iteratively load the tiles
     int buf = 0;
-    for (int loadingOffsetQ = 0; loadingOffsetQ < seqLenQ * batchSize * numHeads; loadingOffsetQ += BLOCK_Q_ROWS) {
-        asyncBufferLoad<QTileSize>(Q, smemQ[buf], loadingOffsetQ, laneId, QFragmentSize, pipeQ);
-        for(int loadingOffsetKV = 0; loadingOffsetKV < seqLenK * batchSize * numHeads; loadingOffsetKV += BLOCK_KV_ROWS) {
-            asyncBufferLoad<KTileSize>(K, smemK[buf], loadingOffsetKV, laneId, KFragmentSize, pipeK);
-            asyncBufferLoad<KTileSize>(V, smemV[buf], loadingOffsetKV, laneId, KFragmentSize, pipeV);
+    for (int loadingOffsetQ = 0; loadingOffsetQ < seqLenQ * batchSize * numHeads; loadingOffsetQ += BLOCK_ROWS) {
+        asyncBufferLoad<QTileSize>(Q, smemQ[buf], loadingOffsetQ, laneId, fragmentSize, pipeQ);
+        for(int loadingOffsetKV = 0; loadingOffsetKV < seqLenK * batchSize * numHeads; loadingOffsetKV += BLOCK_ROWS) {
+            asyncBufferLoad<KTileSize>(K, smemK[buf], loadingOffsetKV, laneId, fragmentSize, pipeK);
+            asyncBufferLoad<KTileSize>(V, smemV[buf], loadingOffsetKV, laneId, fragmentSize, pipeV);
             buf ^= 1;
             // Wait for computation warps to finish calculating on the other buffer.
             __syncthreads();
