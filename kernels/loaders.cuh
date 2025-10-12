@@ -167,18 +167,17 @@ __device__ __forceinline__ void qvLoaderWarp(
     float* smemV[2];
     setQVSmemPointers(smemQ, smemV, qTileElements, kvTileElements);
 
-    uint8_t bufKV = 0;
-    for (int rowKV = 0; rowKV < batchSize * numHeads * seqLen; rowKV += KV_TILE_ROWS) {
-        asyncBufferLoad<kvTileElements>(V, smemV[bufKV], rowKV, laneId, perThreadfragmentSizeKV, pipeV);
-        uint8_t bufQ = 0;
-        for (int rowQ = 0; rowQ < batchSize * numHeads * seqLen; rowQ += Q_TILE_ROWS) {
-            asyncBufferLoad<qTileElements>(Q, smemQ[bufQ], rowQ, laneId, perThreadfragmentSizeQ, pipeQ);
-            bufQ ^= 1;
+    uint8_t bufQ = 0;
+    for (int rowQ = 0; rowQ < batchSize * numHeads * seqLen; rowQ += Q_TILE_ROWS) {
+        asyncBufferLoad<qTileElements>(Q, smemQ[bufQ], rowQ, laneId, perThreadfragmentSizeQ, pipeQ);
+        uint8_t bufKV = 0;
+        for (int rowKV = 0; rowKV < batchSize * numHeads * seqLen; rowKV += KV_TILE_ROWS) {
+            asyncBufferLoad<kvTileElements>(V, smemV[bufKV], rowKV, laneId, perThreadfragmentSizeKV, pipeV);
+            bufKV ^= 1;
             __syncthreads();
         }
-        bufKV ^= 1;
+        bufQ ^= 1;
     }
-   
 }
 
 template<int D_HEAD, int Q_TILE_ROWS, int KV_TILE_ROWS>
@@ -201,13 +200,13 @@ __device__ __forceinline__ void koLoaderWarp(
     float* smemO[2];
     setKOSmemPointers(smemK, smemO, qTileElements, kvTileElements);
 
-    uint8_t bufKV = 0;
-    for (int rowKV = 0; rowKV < batchSize * numHeads * seqLen; rowKV += KV_TILE_ROWS) {
-        asyncBufferLoad<kvTileElements>(K, smemK[bufKV], rowKV, laneId, perThreadfragmentSizeKV, pipeK);
-        for (int rowQ = 0; rowQ < batchSize * numHeads * seqLen; rowQ += Q_TILE_ROWS) {
+    uint8_t bufQ = 0;
+    for (int rowQ = 0; rowQ < batchSize * numHeads * seqLen; rowQ += Q_TILE_ROWS) {
+        for (int rowKV = 0; rowKV < batchSize * numHeads * seqLen; rowKV += KV_TILE_ROWS) {
+            asyncBufferLoad<kvTileElements>(K, smemK[bufQ], rowKV, laneId, perThreadfragmentSizeKV, pipeK);
             __syncthreads();
         }
-        bufKV ^= 1;
-        asyncWriteO(O, smemO, rowKV, laneId, perThreadfragmentSizeO, pipeO);
+        asyncWriteO(O, smemO, rowQ, laneId, perThreadfragmentSizeO, pipeO);
+        bufQ ^= 1;
     }
 }
