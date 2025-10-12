@@ -46,7 +46,7 @@ __device__ __forceinline__ void oneLoaderSetCalculatorAdditionalSmemPointers(flo
 }
 
 
-__device__ __forceinline__ void setCalculatorSmemPointers(float* __restrict__ (&smemQ)[2], float* __restrict__ (&smemK)[2], float* __restrict__ (&smemV)[2], float* __restrict__ &smemO, int qTileElements, int kvTileElements) {
+__device__ __forceinline__ void setComputerSmemPointers(float* __restrict__ (&smemQ)[2], float* __restrict__ (&smemK)[2], float* __restrict__ (&smemV)[2], float* __restrict__ &smemO, int qTileElements, int kvTileElements) {
     setQVSmemPointers(smemQ, smemV, qTileElements, kvTileElements);
     setKOSmemPointers(smemK, smemO, qTileElements, kvTileElements);
 }
@@ -161,16 +161,16 @@ __device__ __forceinline__ void qvLoaderWarp(
     constexpr int kvTileElements = D_HEAD * KV_TILE_ROWS;
     constexpr int perThreadfragmentSizeQ = qTileElements / WARP;
     constexpr int perThreadfragmentSizeKV = kvTileElements / WARP;
-    int laneId = threadIdx.x % 32;
+    uint8_t laneId = threadIdx.x % 32;
 
     float* smemQ[2];
     float* smemV[2];
     setQVSmemPointers(smemQ, smemV, qTileElements, kvTileElements);
 
-    int bufKV = 0;
+    uint8_t bufKV = 0;
     for (int rowKV = 0; rowKV < batchSize * numHeads * seqLen; rowKV += KV_TILE_ROWS) {
         asyncBufferLoad<kvTileElements>(V, smemV[bufKV], rowKV, laneId, perThreadfragmentSizeKV, pipeV);
-        int bufQ = 0;
+        uint8_t bufQ = 0;
         for (int rowQ = 0; rowQ < batchSize * numHeads * seqLen; rowQ += Q_TILE_ROWS) {
             asyncBufferLoad<qTileElements>(Q, smemQ[bufQ], rowQ, laneId, perThreadfragmentSizeQ, pipeQ);
             bufQ ^= 1;
@@ -195,13 +195,13 @@ __device__ __forceinline__ void koLoaderWarp(
     constexpr int kvTileElements = D_HEAD * KV_TILE_ROWS;
     constexpr int perThreadfragmentSizeKV = kvTileElements / WARP;
     constexpr int perThreadfragmentSizeO = qTileElements / WARP; // O is same size as the Q Tile.
-    int laneId = threadIdx.x % 32;
+    uint8_t laneId = threadIdx.x % 32;
 
     float* smemK[2];
     float* smemO[2];
     setKOSmemPointers(smemK, smemO, qTileElements, kvTileElements);
 
-    int bufKV = 0;
+    uint8_t bufKV = 0;
     for (int rowKV = 0; rowKV < batchSize * numHeads * seqLen; rowKV += KV_TILE_ROWS) {
         asyncBufferLoad<kvTileElements>(K, smemK[bufKV], rowKV, laneId, perThreadfragmentSizeKV, pipeK);
         for (int rowQ = 0; rowQ < batchSize * numHeads * seqLen; rowQ += Q_TILE_ROWS) {
