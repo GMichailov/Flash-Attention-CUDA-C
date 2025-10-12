@@ -103,9 +103,27 @@ __device__ __forceinline__ void twoLoaderMhaComputeWarp(
             if (is_causal && (globalKVRow + group.meta_group_rank() > globalQRow + warp.meta_group_rank())) score = -INFINITY;
             else computeAttentionScore<Q_TILE_ROWS, KV_TILE_ROWS, D_HEAD>(smemQ[bufQ], smemK[bufKV], scale, warp, group, score);
 
-            float new_max;
-            float new_l;
-            if (group.thread_rank() == 0)  
+            float curr_max;
+            float curr_l;
+            // Each thread then multiplies its fragment against V corresponding V fragment
+            // Sum into the first groups fragment for each group in the warp.
+            // smemo += this from first group
+            group.sync();
+            // Sum group to get score and then find max score for warp.
+            score = cg::reduce(group, score, cg::plus<float>());
+            curr_max = cg::reduce(warp, score, cg::greater<float>());
+            curr_max = fmaxf(curr_max, running_max);
+            // Sum up scores held by group leaders in warp and find max simultaneously.
+            curr_l = (group.thread_rank() == 0) ? expf(score - curr_max) : 0.0f;
+            unsigned mask = groupLeaderMask(group.size());
+            #pragma unroll
+            for (int offset = 16; offset > 0; offset >>= 1) {
+                curr_l += __shfl_down_sync(mask, curr_l, offset);
+            }
+            // Broadcast out the currentl to all warp threads.
+            curr_l = __shfl_sync(0xFFFFFFFF, curr_l, 0);
+
+            // Multiply against V and Accumulate into O
         }
     }
 

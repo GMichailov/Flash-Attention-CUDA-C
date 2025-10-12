@@ -49,6 +49,16 @@ __global__ __forceinline__ void computeAttentionScore(
 }
 
 
+__global__ __forceinline__ unsigned groupLeaderMask(int group_size) {
+    unsigned mask = 0;
+    #pragma unroll
+    for (uint8_t lane = 0; lane < 32; lane += group_size) {
+        mask |= (1u << lane);
+    }
+    return mask;
+}
+
+
 __global__ __forceinline__ void rowSoftmax(
     float* __restrict__ smemM, float* __restrict__ smemL, 
     int qRow, float score, float& newMax, float& newL
@@ -56,6 +66,11 @@ __global__ __forceinline__ void rowSoftmax(
     newMax = fmaxf(smemM[qRow], score);
     newL = smemL[qRow] * expf(smemM[qRow] - newMax) + expf(score - newMax);
 }
+
+
+__global__ __forceinline__ void rowSoftmax(
+    float& running_max, float& running_l, float& score
+) {}
 
 
 template<int ROWS_PER_WARP>
