@@ -32,6 +32,23 @@ __global__ __forceinline__ int computeRowNoncausalAttentionScore(
 }
 
 
+template<int Q_TILE_ROWS, int KV_TILE_ROWS, int D_HEAD> 
+__global__ __forceinline__ void computeAttentionScore(
+    float* smemQPtr, float* smemKPtr,
+    const float scale, auto& warp, auto& group, float& score
+) {
+    uint8_t fragmentSize = D_HEAD / group.size();
+    smemQPtr += warp.meta_group_size() * D_HEAD + group.thread_rank() * fragmentSize;
+    smemKPtr += group.meta_group_rank() * D_HEAD + group.thread_rank() * fragmentSize;
+    #pragma unroll
+    for (int i = 0; i < fragmentSize; ++i) {
+        score += smemQPtr[i] * smemKPtr[i];
+    }
+    group.sync();
+    score = cg::reduce(group, score, cg::plus<float>()) * scale;
+}
+
+
 __global__ __forceinline__ void rowSoftmax(
     float* __restrict__ smemM, float* __restrict__ smemL, 
     int qRow, float score, float& newMax, float& newL

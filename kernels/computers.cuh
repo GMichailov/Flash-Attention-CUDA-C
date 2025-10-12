@@ -3,6 +3,7 @@
 #include "utils.cuh"
 
 // TODO: Bring in missing vars
+/*
 template<int DHEAD, int BLOCK_ROWS, int ROWS_PER_WARP>
 __device__ __forceinline__ void singleLoaderMhaComputeWarp(
     float* __restrict__ (&smem)[2],
@@ -55,16 +56,23 @@ __device__ __forceinline__ void singleLoaderMhaComputeWarp(
         }
     }
 }
-
+*/
 
 template<int D_HEAD, int Q_TILE_ROWS, int KV_TILE_ROWS>
 __device__ __forceinline__ void twoLoaderMhaComputeWarp(
-    auto& block, int batchSize, int numHeads, int seqLen
+    auto& block, int batchSize, int numHeads, int seqLen, float scale, bool is_causal
 ) {
+    __shared__ cuda::pipeline_shared_state<cuda::thread_scope_block> pipeStateQ;
+    __shared__ cuda::pipeline_shared_state<cuda::thread_scope_block> pipeStateK;
+    __shared__ cuda::pipeline_shared_state<cuda::thread_scope_block> pipeStateV;
+    __shared__ cuda::pipeline_shared_state<cuda::thread_scope_block> pipeStateO;
+    auto pipeQ = cuda::make_pipeline(block, &pipeStateQ);
+    auto pipeK = cuda::make_pipeline(block, &pipeStateK);
+    auto pipeV = cuda::make_pipeline(block, &pipeStateV);
+    auto pipeO = cuda::make_pipeline(block, &pipeStateO);
+
     constexpr int qTileElements = D_HEAD * Q_TILE_ROWS;
     constexpr int kvTileElements = D_HEAD * KV_TILE_ROWS;
-    constexpr int perThreadfragmentSizeQ = qTileElements / WARP;
-    constexpr int perThreadfragmentSizeKV = kvTileElements / WARP;
 
     // Create partitions per Q row
     auto warp = cg::tiled_partition<WARP>(block);
@@ -79,16 +87,34 @@ __device__ __forceinline__ void twoLoaderMhaComputeWarp(
 
     // Allocate/Store reused data.
     uint8_t bufQ = 0;
-    uint8_t bufKV = 0;
     float score;
-    float newMax;
-    float newL;
+    float running_max;
+    float running_l;
+
+    // Grab Q and stream KV against it to be able to store O stuff per warp and only keep a Q_TILE_ROWS tile for O.
+    for (int globalQRow = 0; globalQRow < batchSize * numHeads * seqLen; globalQRow += Q_TILE_ROWS) {
+        score = 0.0f;
+        running_max = -INFINITY;
+        running_l = 0.0f;
+        uint8_t bufKV = 0;
+        pipeQ.consumer_wait();
+        for (int globalKVRow = 0; globalKVRow < batchSize * numHeads * seqLen; globalKVRow += KV_TILE_ROWS) {
+            pipeK.consumer_wait();
+            if (is_causal && (globalKVRow + group.meta_group_rank() > globalQRow + warp.meta_group_rank())) score = -INFINITY;
+            else computeAttentionScore<Q_TILE_ROWS, KV_TILE_ROWS, D_HEAD>(smemQ[bufQ], smemK[bufKV], scale, warp, group, score);
+
+            float new_max;
+            float new_l;
+            if (group.thread_rank() == 0)  
+        }
+    }
 
 
 
 
     //==========================================================================================================================
     // Begin Iterating through tiles.
+    /*
     for(int absoluteQRow = 0; absoluteQRow < seqLenQ * batchSize * numHeads; absoluteQRow += BLOCK_ROWS) {
         int relativeKvRow = rowGroup.thread_rank() / (WARP / ROWS_PER_WARP);
         for (int absoluteKvRow = 0; absoluteKvRow < seqLenK * batchSize * numHeads; absoluteKvRow += BLOCK_ROWS) {
@@ -111,4 +137,5 @@ __device__ __forceinline__ void twoLoaderMhaComputeWarp(
             buf ^= 1;
         }
     }
+    */
 }
