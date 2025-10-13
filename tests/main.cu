@@ -59,7 +59,7 @@ void test_flash_attention(bool is_causal = false) {
     constexpr int threadsPerBlock = numWarps * WARP;
     dim3 grid(1);
     dim3 block(threadsPerBlock);
-    size_t sharedMemBytes = (2 * Q_TILE_ROWS + 4 * KV_TILE_ROWS + Q_TILE_ROWS) * D_HEAD;
+    size_t sharedMemBytes = (2 * Q_TILE_ROWS + 4 * KV_TILE_ROWS + Q_TILE_ROWS) * D_HEAD * sizeof(float);
 
     printf("Launching kernel with %d threads (%d warps)...\n", threadsPerBlock, numWarps);
 
