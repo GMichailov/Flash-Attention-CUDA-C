@@ -13,7 +13,7 @@
 #include <cooperative_groups.h>
 #include <cooperative_groups/reduce.h>
 
-
+/*
 // Kernel that uses only 1 warp for loading from HBM into SRAM (High compute needs so maybe for FP32)
 template<int DHEAD, int BLOCK_Q_ROWS, int BLOCK_KV_ROWS, int ROWS_PER_WARP>
 __global__ void oneLoaderMhaFlashAttentionKernel(
@@ -54,7 +54,7 @@ __global__ void threeLoaderMhaFlashAttentionKernel(
     int strideHeadQ, int strideHeadK, int strideHeadV, int strideHeadO,
     float scale, 
     int BLOCK_KV_ROWS, bool is_causal
-);
+);*/
 
 template<int D_HEAD, int Q_TILE_ROWS, int KV_TILE_ROWS>
 __global__ void twoLoaderMhaFlashAttentionKernel(

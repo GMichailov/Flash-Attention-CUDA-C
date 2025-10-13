@@ -115,7 +115,7 @@ __device__ __forceinline__ void asyncWriteO(float* __restrict__ O, float* __rest
     pipeO.producer_commit();
 }
 
-
+/*
 template<int D_HEAD, int BLOCK_ROWS, int ROWS_PER_WARP>
 __device__ __forceinline__ void singleLoaderWarp(
     float* __restrict__ (&smem)[2], 
@@ -145,11 +145,11 @@ __device__ __forceinline__ void singleLoaderWarp(
             __syncthreads();
         }
     }
-}
+}*/
 
 template<int D_HEAD, int Q_TILE_ROWS, int KV_TILE_ROWS>
 __device__ __forceinline__ void qvLoaderWarp(
-    float* __restrict__ Q, float* __restrict__ V,
+    const float* __restrict__ Q, const float* __restrict__ V,
     auto& block, const int& batchSize, const int& numHeads, const int& seqLen
 ) {
     __shared__ cuda::pipeline_shared_state<cuda::thread_scope_block, 2> pipeStateQ;
@@ -182,7 +182,7 @@ __device__ __forceinline__ void qvLoaderWarp(
 
 template<int D_HEAD, int Q_TILE_ROWS, int KV_TILE_ROWS>
 __device__ __forceinline__ void koLoaderWarp(
-    float* __restrict__ K, float* __restrict__ O,
+    const float* __restrict__ K, float* __restrict__ O,
     auto& block, const int& batchSize, const int& numHeads, const int& seqLen
 ) {
     __shared__ cuda::pipeline_shared_state<cuda::thread_scope_block, 2> pipeStateK;
@@ -197,7 +197,7 @@ __device__ __forceinline__ void koLoaderWarp(
     uint8_t laneId = threadIdx.x % 32;
 
     float* smemK[2];
-    float* smemO[2];
+    float* smemO;
     setKOSmemPointers(smemK, smemO, qTileElements, kvTileElements);
 
     uint8_t bufQ = 0;

@@ -82,7 +82,7 @@ __device__ __forceinline__ void twoLoaderMhaComputeWarp(
     float* smemQ[2];
     float* smemK[2];
     float* smemV[2];
-    float* smemO[2];
+    float* smemO;
     setComputerSmemPointers(smemQ, smemK, smemV, smemO, qTileElements, kvTileElements);
 
     // Allocate/Store reused data.
@@ -130,12 +130,12 @@ __device__ __forceinline__ void twoLoaderMhaComputeWarp(
             pipeO.consumer_wait();
             // For each float in fragment, accumulate into thread X of group 0 which will write to corresponding smemO index.
             for (int idx = 0; idx < (D_HEAD / group.size()); ++idx) {
-                float out = weight * smemV[warp.meta_group_rank() * D_HEAD + group.thread_rank() * idx];
+                float out = weight * smemV[bufKV][static_cast<int>(warp.meta_group_rank()) * D_HEAD + static_cast<int>(group.thread_rank()) * idx];
                 for (int offset = group.size(); offset < 32; offset += group.size()) {
                     out += __shfl_down_sync(mask, out, offset);
                 }
                 if (group.meta_group_rank() == 0) {
-                    if (globalKVRow == 0) smemO[warp.meta_group_rank() * D_HEAD + group.thread_rank() * idx] = out;
+                    if (globalKVRow == 0) smemO[static_cast<int>(warp.meta_group_rank()) * D_HEAD + static_cast<int>(group.thread_rank()) * idx] = out;
                     else smemO[warp.meta_group_rank() * D_HEAD + group.thread_rank() * idx] += out;
                 }
             }

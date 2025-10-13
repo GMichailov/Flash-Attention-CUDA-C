@@ -5,6 +5,7 @@
 #include <cuda/pipeline>
 #include <cuda_runtime_api.h>
 #include <cooperative_groups.h>
+#include <cooperative_groups/reduce.h>
 
 namespace cg = cooperative_groups;
 
@@ -67,7 +68,7 @@ __device__ __forceinline__ void threadRankMask(int group_size, int group_thread_
     }
 }
 
-
+/*
 __device__ __forceinline__ void rowSoftmax(
     float* __restrict__ smemM, float* __restrict__ smemL, 
     int qRow, float score, float& newMax, float& newL
@@ -94,7 +95,7 @@ __device__ __forceinline__ void multiplyVStoreO(
         oPtr[i] = oPtr[i] * rescale + weight * vPtr[i];
     }
 }
-
+*/
 __device__ __forceinline__ void updateML(
     float* __restrict__ smemL, float* __restrict__ smemM,
     int qRow, const float& newL, const float& newMax
