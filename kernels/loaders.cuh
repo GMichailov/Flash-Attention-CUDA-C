@@ -150,12 +150,9 @@ __device__ __forceinline__ void singleLoaderWarp(
 template<int D_HEAD, int Q_TILE_ROWS, int KV_TILE_ROWS>
 __device__ __forceinline__ void qvLoaderWarp(
     const float* __restrict__ Q, const float* __restrict__ V,
-    auto& block, const int& batchSize, const int& numHeads, const int& seqLen
+    auto& block, const int& batchSize, const int& numHeads, const int& seqLen,
+    auto& pipeQ, auto& pipeV
 ) {
-    __shared__ cuda::pipeline_shared_state<cuda::thread_scope_block, 2> pipeStateQ;
-    __shared__ cuda::pipeline_shared_state<cuda::thread_scope_block, 2> pipeStateV;
-    auto pipeQ = cuda::make_pipeline(block, &pipeStateQ);
-    auto pipeV = cuda::make_pipeline(block, &pipeStateV);
 
     constexpr int qTileElements = D_HEAD * Q_TILE_ROWS;
     constexpr int kvTileElements = D_HEAD * KV_TILE_ROWS;
@@ -183,7 +180,8 @@ __device__ __forceinline__ void qvLoaderWarp(
 template<int D_HEAD, int Q_TILE_ROWS, int KV_TILE_ROWS>
 __device__ __forceinline__ void koLoaderWarp(
     const float* __restrict__ K, float* __restrict__ O,
-    auto& block, const int& batchSize, const int& numHeads, const int& seqLen
+    auto& block, const int& batchSize, const int& numHeads, const int& seqLen,
+    auto& pipeK, auto& pipeO
 ) {
     __shared__ cuda::pipeline_shared_state<cuda::thread_scope_block, 2> pipeStateK;
     __shared__ cuda::pipeline_shared_state<cuda::thread_scope_block, 2> pipeStateO;

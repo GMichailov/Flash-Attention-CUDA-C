@@ -60,17 +60,9 @@ __device__ __forceinline__ void singleLoaderMhaComputeWarp(
 
 template<int D_HEAD, int Q_TILE_ROWS, int KV_TILE_ROWS>
 __device__ __forceinline__ void twoLoaderMhaComputeWarp(
-    auto& block, int batchSize, int numHeads, int seqLen, float scale, bool is_causal
+    auto& block, int batchSize, int numHeads, int seqLen, float scale, bool is_causal,
+    auto& pipeQ, auto& pipeK, auto& pipeV, auto& pipeO
 ) {
-    __shared__ cuda::pipeline_shared_state<cuda::thread_scope_block, 2> pipeStateQ;
-    __shared__ cuda::pipeline_shared_state<cuda::thread_scope_block, 2> pipeStateK;
-    __shared__ cuda::pipeline_shared_state<cuda::thread_scope_block, 2> pipeStateV;
-    __shared__ cuda::pipeline_shared_state<cuda::thread_scope_block, 2> pipeStateO;
-    auto pipeQ = cuda::make_pipeline(block, &pipeStateQ);
-    auto pipeK = cuda::make_pipeline(block, &pipeStateK);
-    auto pipeV = cuda::make_pipeline(block, &pipeStateV);
-    auto pipeO = cuda::make_pipeline(block, &pipeStateO);
-
     constexpr int qTileElements = D_HEAD * Q_TILE_ROWS;
     constexpr int kvTileElements = D_HEAD * KV_TILE_ROWS;
 

@@ -65,12 +65,20 @@ __global__ void twoLoaderMhaFlashAttentionKernel(
     auto block = cg::this_thread_block();
     int warpId = threadIdx.x / WARP;
     int numWarps = blockDim.x / WARP;
+    __shared__ cuda::pipeline_shared_state<cuda::thread_scope_block, 2> pipeStateQ;
+    __shared__ cuda::pipeline_shared_state<cuda::thread_scope_block, 2> pipeStateK;
+    __shared__ cuda::pipeline_shared_state<cuda::thread_scope_block, 2> pipeStateV;
+    __shared__ cuda::pipeline_shared_state<cuda::thread_scope_block, 2> pipeStateO;
+    auto pipeQ = cuda::make_pipeline(block, &pipeStateQ);
+    auto pipeK = cuda::make_pipeline(block, &pipeStateK);
+    auto pipeV = cuda::make_pipeline(block, &pipeStateV);
+    auto pipeO = cuda::make_pipeline(block, &pipeStateO);
     // Split off loader warps
     if (warpId < numWarps - 2) {
-        twoLoaderMhaComputeWarp<D_HEAD, Q_TILE_ROWS, KV_TILE_ROWS>(block, batchSize, numHeads, seqLen, scale, is_causal);
+        twoLoaderMhaComputeWarp<D_HEAD, Q_TILE_ROWS, KV_TILE_ROWS>(block, batchSize, numHeads, seqLen, scale, is_causal, pipeQ, pipeK, pipeV, pipeO);
     } else if (warpId == numWarps - 2) {
-        qvLoaderWarp<D_HEAD, Q_TILE_ROWS, KV_TILE_ROWS>(Q, V, block, batchSize, numHeads, seqLen);
+        qvLoaderWarp<D_HEAD, Q_TILE_ROWS, KV_TILE_ROWS>(Q, V, block, batchSize, numHeads, seqLen, pipeQ, pipeV);
     } else {
-        koLoaderWarp<D_HEAD, Q_TILE_ROWS, KV_TILE_ROWS>(K, O, block, batchSize, numHeads, seqLen);
+        koLoaderWarp<D_HEAD, Q_TILE_ROWS, KV_TILE_ROWS>(K, O, block, batchSize, numHeads, seqLen, pipeK, pipeO);
     }
 }
