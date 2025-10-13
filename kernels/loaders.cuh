@@ -152,8 +152,8 @@ __device__ __forceinline__ void qvLoaderWarp(
     float* __restrict__ Q, float* __restrict__ V,
     auto& block, const int& batchSize, const int& numHeads, const int& seqLen
 ) {
-    __shared__ cuda::pipeline_shared_state<cuda::thread_scope_block> pipeStateQ;
-    __shared__ cuda::pipeline_shared_state<cuda::thread_scope_block> pipeStateV;
+    __shared__ cuda::pipeline_shared_state<cuda::thread_scope_block, 2> pipeStateQ;
+    __shared__ cuda::pipeline_shared_state<cuda::thread_scope_block, 2> pipeStateV;
     auto pipeQ = cuda::make_pipeline(block, &pipeStateQ);
     auto pipeV = cuda::make_pipeline(block, &pipeStateV);
 
@@ -185,8 +185,8 @@ __device__ __forceinline__ void koLoaderWarp(
     float* __restrict__ K, float* __restrict__ O,
     auto& block, const int& batchSize, const int& numHeads, const int& seqLen
 ) {
-    __shared__ cuda::pipeline_shared_state<cuda::thread_scope_block> pipeStateK;
-    __shared__ cuda::pipeline_shared_state<cuda::thread_scope_block> pipeStateO;
+    __shared__ cuda::pipeline_shared_state<cuda::thread_scope_block, 2> pipeStateK;
+    __shared__ cuda::pipeline_shared_state<cuda::thread_scope_block, 2> pipeStateO;
     auto pipeK = cuda::make_pipeline(block, &pipeStateK);
     auto pipeO = cuda::make_pipeline(block, &pipeStateO);
 

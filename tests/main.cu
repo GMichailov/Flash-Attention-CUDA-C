@@ -1,4 +1,4 @@
-#include "FlashAttention.cuh"
+#include "../kernels/FlashAttention.cuh"
 
 int main() {
     twoLoaderMhaFlashAttentionKernel<64, 16, 16><<<1, 256>>>(

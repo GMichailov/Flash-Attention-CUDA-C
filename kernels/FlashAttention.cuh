@@ -11,6 +11,7 @@
 #include <cmath>
 #include <cuda/pipeline>
 #include <cooperative_groups.h>
+#include <cooperative_groups/reduce.h>
 
 
 // Kernel that uses only 1 warp for loading from HBM into SRAM (High compute needs so maybe for FP32)
@@ -67,7 +68,7 @@ __global__ void twoLoaderMhaFlashAttentionKernel(
     // Split off loader warps
     if (warpId < numWarps - 2) {
         twoLoaderMhaComputeWarp<D_HEAD, Q_TILE_ROWS, KV_TILE_ROWS>(block, batchSize, numHeads, seqLen, scale, is_causal);
-    } else if {
+    } else if (warpId == numWarps - 2) {
         qvLoaderWarp<D_HEAD, Q_TILE_ROWS, KV_TILE_ROWS>(Q, V, block, batchSize, numHeads, seqLen);
     } else {
         koLoaderWarp<D_HEAD, Q_TILE_ROWS, KV_TILE_ROWS>(K, O, block, batchSize, numHeads, seqLen);

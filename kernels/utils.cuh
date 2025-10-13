@@ -14,7 +14,7 @@ namespace cg = cooperative_groups;
 using pipe_t = cuda::pipeline<cuda::thread_scope_block>;
 
 template<int ROWS_PER_WARP, int D_HEAD>
-__global__ __forceinline__ int computeRowNoncausalAttentionScore(
+__device__ __forceinline__ int computeRowNoncausalAttentionScore(
     const float* smemQBuf, const float* smemKBuf,
     int relativeRow, float scale, int fragmentSize,
     cg::thread_block_tile<WARP / ROWS_PER_WARP>& rowGroup
@@ -33,7 +33,7 @@ __global__ __forceinline__ int computeRowNoncausalAttentionScore(
 
 
 template<int Q_TILE_ROWS, int KV_TILE_ROWS, int D_HEAD> 
-__global__ __forceinline__ void computeAttentionScore(
+__device__ __forceinline__ void computeAttentionScore(
     float* smemQPtr, float* smemKPtr,
     const float scale, auto& warp, auto& group, float& score
 ) {
@@ -49,7 +49,7 @@ __global__ __forceinline__ void computeAttentionScore(
 }
 
 
-__global__ __forceinline__ unsigned groupLeaderMask(int group_size) {
+__device__ __forceinline__ unsigned groupLeaderMask(int group_size) {
     unsigned mask = 0;
     #pragma unroll
     for (uint8_t lane = 0; lane < 32; lane += group_size) {
@@ -59,7 +59,7 @@ __global__ __forceinline__ unsigned groupLeaderMask(int group_size) {
 }
 
 
-__global__ __forceinline__ unsigned threadRankMask(int group_size, int group_thread_rank, unsigned& mask) {
+__device__ __forceinline__ void threadRankMask(int group_size, int group_thread_rank, unsigned& mask) {
     mask = 0;
     #pragma unroll
     for (uint8_t i = group_thread_rank; i < 32; i += group_size) {
@@ -68,7 +68,7 @@ __global__ __forceinline__ unsigned threadRankMask(int group_size, int group_thr
 }
 
 
-__global__ __forceinline__ void rowSoftmax(
+__device__ __forceinline__ void rowSoftmax(
     float* __restrict__ smemM, float* __restrict__ smemL, 
     int qRow, float score, float& newMax, float& newL
 ) {
@@ -78,7 +78,7 @@ __global__ __forceinline__ void rowSoftmax(
 
 
 template<int ROWS_PER_WARP>
-__global__ __forceinline__ void multiplyVStoreO(
+__device__ __forceinline__ void multiplyVStoreO(
     float* __restrict__ smemV, float* __restrict__ O, float* __restrict__ OFrag,
     float* __restrict__ smemL, float* __restrict__ smemM, 
     int QFragmentSize, int qIdx, int qRow, int kvRow, const float& score,
@@ -95,7 +95,7 @@ __global__ __forceinline__ void multiplyVStoreO(
     }
 }
 
-__global__ __forceinline__ void updateML(
+__device__ __forceinline__ void updateML(
     float* __restrict__ smemL, float* __restrict__ smemM,
     int qRow, const float& newL, const float& newMax
 ) {
