@@ -54,3 +54,22 @@ __global__ void threeLoaderMhaFlashAttentionKernel(
     float scale, 
     int BLOCK_KV_ROWS, bool is_causal
 );
+
+template<int D_HEAD, int Q_TILE_ROWS, int KV_TILE_ROWS>
+__global__ void twoLoaderMhaFlashAttentionKernel(
+    const float* __restrict__ Q, const float* __restrict__ K, const float* __restrict__ V, float* __restrict__ O,
+    int batchSize, int numHeads, int seqLen, float scale, bool is_causal
+)
+{
+    auto block = cg::this_thread_block();
+    int warpId = threadIdx.x / WARP;
+    int numWarps = blockDim.x / WARP;
+    // Split off loader warps
+    if (warpId < numWarps - 2) {
+        twoLoaderMhaComputeWarp<D_HEAD, Q_TILE_ROWS, KV_TILE_ROWS>(block, batchSize, numHeads, seqLen, scale, is_causal);
+    } else if {
+        qvLoaderWarp<D_HEAD, Q_TILE_ROWS, KV_TILE_ROWS>(Q, V, block, batchSize, numHeads, seqLen);
+    } else {
+        koLoaderWarp<D_HEAD, Q_TILE_ROWS, KV_TILE_ROWS>(K, O, block, batchSize, numHeads, seqLen);
+    }
+}
