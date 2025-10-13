@@ -89,9 +89,13 @@ __device__ __forceinline__ void twoLoaderMhaComputeWarp(
         running_max = -INFINITY;
         running_l = 0.0f;
         uint8_t bufKV = 0;
+        DBG("CMP", "QRow=%d pre-consumer_wait(Q)", globalQRow);
         pipeQ.consumer_wait();
+        DBG("CMP", "QRow=%d post-consumer_wait(Q)", globalQRow);
         for (int globalKVRow = 0; globalKVRow < batchSize * numHeads * seqLen; globalKVRow += KV_TILE_ROWS) {
+            DBG("CMP", "QRow=%d KVRow=%d pre-consumer_wait(K)", globalQRow, globalKVRow);
             pipeK.consumer_wait();
+            DBG("CMP", "QRow=%d KVRow=%d post-consumer_wait(K)", globalQRow, globalKVRow);
             if (is_causal && (globalKVRow + group.meta_group_rank() > globalQRow + warp.meta_group_rank())) score = -INFINITY;
             else computeAttentionScore<Q_TILE_ROWS, KV_TILE_ROWS, D_HEAD>(smemQ[bufQ], smemK[bufKV], scale, warp, group, score);
 
@@ -115,8 +119,9 @@ __device__ __forceinline__ void twoLoaderMhaComputeWarp(
             running_max = fmaxf(curr_max, running_max);
             // Multiply against V
             float weight = expf(score - running_max) / running_l;
+            DBG("CMP", "QRow=%d KVRow=%d pre-consumer_wait(V)", globalQRow, globalKVRow);
             pipeV.consumer_wait();
-
+            DBG("CMP", "QRow=%d KVRow=%d post-consumer_wait(V)", globalQRow, globalKVRow);
             // Create mask so that thread X of each group in the warp sees each other.
             threadRankMask(group.size(), group.thread_rank(), mask);
             pipeO.consumer_wait();
@@ -131,7 +136,9 @@ __device__ __forceinline__ void twoLoaderMhaComputeWarp(
                     else smemO[warp.meta_group_rank() * D_HEAD + group.thread_rank() * idx] += out;
                 }
             }
+            DBG("CMP", "pre-syncthreads");
             __syncthreads();
+            DBG("CMP", "post-syncthreads");
         }
     }
 }

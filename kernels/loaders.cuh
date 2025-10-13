@@ -166,12 +166,18 @@ __device__ __forceinline__ void qvLoaderWarp(
 
     uint8_t bufQ = 0;
     for (int rowQ = 0; rowQ < batchSize * numHeads * seqLen; rowQ += Q_TILE_ROWS) {
+        DBG("QV", "rowQ=%d bufQ=%d pre-loadQ", rowQ, bufQ);
         asyncBufferLoad<qTileElements>(Q, smemQ[bufQ], rowQ, laneId, perThreadfragmentSizeQ, pipeQ);
+        DBG("QV", "rowQ=%d bufQ=%d post-commitQ", rowQ, bufQ);
         uint8_t bufKV = 0;
         for (int rowKV = 0; rowKV < batchSize * numHeads * seqLen; rowKV += KV_TILE_ROWS) {
+            DBG("QV", "rowQ=%d rowKV=%d bufKV=%d pre-loadV", rowQ, rowKV, bufKV);
             asyncBufferLoad<kvTileElements>(V, smemV[bufKV], rowKV, laneId, perThreadfragmentSizeKV, pipeV);
+            DBG("QV", "rowQ=%d rowKV=%d bufKV=%d post-commitV", rowQ, rowKV, bufKV);
             bufKV ^= 1;
+            DBG("QV", "pre-syncthreads");
             __syncthreads();
+            DBG("QV", "post-syncthreads");
         }
         bufQ ^= 1;
     }
@@ -196,10 +202,16 @@ __device__ __forceinline__ void koLoaderWarp(
     uint8_t bufQ = 0;
     for (int rowQ = 0; rowQ < batchSize * numHeads * seqLen; rowQ += Q_TILE_ROWS) {
         for (int rowKV = 0; rowKV < batchSize * numHeads * seqLen; rowKV += KV_TILE_ROWS) {
+            DBG("KO", "rowKV=%d bufQ=%d pre-loadK", rowKV, bufQ);
             asyncBufferLoad<kvTileElements>(K, smemK[bufQ], rowKV, laneId, perThreadfragmentSizeKV, pipeK);
+            DBG("KO", "rowKV=%d bufQ=%d post-commitK", rowKV, bufQ);
+            DBG("KO", "pre-syncthreads");
             __syncthreads();
+            DBG("KO", "post-syncthreads");
         }
+        DBG("KO", "rowQ=%d pre-writeO", rowQ);
         asyncWriteO(O, smemO, rowQ, laneId, perThreadfragmentSizeO, pipeO);
+        DBG("KO", "rowQ=%d post-commitO", rowQ);
         bufQ ^= 1;
     }
 }
