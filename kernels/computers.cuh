@@ -105,14 +105,10 @@ __device__ __forceinline__ void twoLoaderMhaComputeWarp(
 
             float curr_max;
             float curr_l;
-            // Each thread then multiplies its fragment against V corresponding V fragment
-            // Sum into the first groups fragment for each group in the warp.
-            // smemo += this from first group
             group.sync();
             // Sum group to get score and then find max score for warp.
             score = cg::reduce(group, score, cg::plus<float>());
             curr_max = cg::reduce(warp, score, cg::greater<float>());
-            curr_max = fmaxf(curr_max, running_max);
             // Sum up scores held by group leaders in warp and find max simultaneously.
             curr_l = (group.thread_rank() == 0) ? expf(score - curr_max) : 0.0f;
             unsigned mask = groupLeaderMask(group.size());
@@ -120,40 +116,30 @@ __device__ __forceinline__ void twoLoaderMhaComputeWarp(
             for (int offset = 16; offset > 0; offset >>= 1) {
                 curr_l += __shfl_down_sync(mask, curr_l, offset);
             }
-            // Broadcast out the currentl to all warp threads.
-            curr_l = __shfl_sync(0xFFFFFFFF, curr_l, 0);
-
-            // Multiply against V and Accumulate into O
-        }
-    }
-
-
-
-
-    //==========================================================================================================================
-    // Begin Iterating through tiles.
-    /*
-    for(int absoluteQRow = 0; absoluteQRow < seqLenQ * batchSize * numHeads; absoluteQRow += BLOCK_ROWS) {
-        int relativeKvRow = rowGroup.thread_rank() / (WARP / ROWS_PER_WARP);
-        for (int absoluteKvRow = 0; absoluteKvRow < seqLenK * batchSize * numHeads; absoluteKvRow += BLOCK_ROWS) {
-            pipeK.consumer_wait();
-            // Each rowGroup handles its calculations
-            if (absoluteKvRow + relativeKvRow > absoluteQRow) {
-                score = -INFINITY;
-            } else {
-                computeRowNoncausalAttentionScore<ROWS_PER_WARP>(QFrag, smemK[buf], kvRow, laneId, scale, D_HEAD, QFragmentSize, rowGroup);
-            }
-            if (!rowGroup.thread_rank()) {
-                // Pass correct Q row.
-                rowSoftmax(&smemM, &smemL, , score, newMax, newL);
-            }
-            newMax = rowGroup.shfl(newMax, 0);
-            newL = rowGroup.shfl(newL, 0);
-            rowGroup.sync();
+            // Caculate the actual l itself in thread 0.
+            if (warp.thread_rank() == 0) curr_l = expf(running_max - fmaxf(curr_max, running_max)) * running_l + expf(curr_max - fmaxf(curr_max, running_max)) * curr_l;
+            // Broadcast out the newly calculated l to all warp threads.
+            running_l = __shfl_sync(0xFFFFFFFF, curr_l, 0);
+            running_max = fmaxf(curr_max, running_max);
+            // Multiply against V
+            float weight = expf(score - running_max) / running_l;
             pipeV.consumer_wait();
-            multiplyVStoreO();
-            buf ^= 1;
+
+            // Create mask so that thread X of each group in the warp sees each other.
+            threadRankMask(group.size(), group.thread_rank(), mask);
+            pipeO.consumer_wait();
+            // For each float in fragment, accumulate into thread X of group 0 which will write to corresponding smemO index.
+            for (int idx = 0; idx < (D_HEAD / group.size()); ++idx) {
+                float out = weight * smemV[warp.meta_group_rank() * D_HEAD + group.thread_rank() * idx];
+                for (int offset = group.size(); offset < 32; offset += group.size()) {
+                    out += __shfl_down_sync(mask, out, offset);
+                }
+                if (group.meta_group_rank() == 0) {
+                    if (globalKVRow == 0) smemO[warp.meta_group_rank() * D_HEAD + group.thread_rank() * idx] = out;
+                    else smemO[warp.meta_group_rank() * D_HEAD + group.thread_rank() * idx] += out;
+                }
+            }
+            __syncthreads();
         }
     }
-    */
 }

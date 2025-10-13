@@ -59,6 +59,15 @@ __global__ __forceinline__ unsigned groupLeaderMask(int group_size) {
 }
 
 
+__global__ __forceinline__ unsigned threadRankMask(int group_size, int group_thread_rank, unsigned& mask) {
+    mask = 0;
+    #pragma unroll
+    for (uint8_t i = group_thread_rank; i < 32; i += group_size) {
+        mask |= (1u << i);
+    }
+}
+
+
 __global__ __forceinline__ void rowSoftmax(
     float* __restrict__ smemM, float* __restrict__ smemL, 
     int qRow, float score, float& newMax, float& newL
