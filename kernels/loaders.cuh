@@ -183,11 +183,6 @@ __device__ __forceinline__ void koLoaderWarp(
     auto& block, const int& batchSize, const int& numHeads, const int& seqLen,
     auto& pipeK, auto& pipeO
 ) {
-    __shared__ cuda::pipeline_shared_state<cuda::thread_scope_block, 2> pipeStateK;
-    __shared__ cuda::pipeline_shared_state<cuda::thread_scope_block, 2> pipeStateO;
-    auto pipeK = cuda::make_pipeline(block, &pipeStateK);
-    auto pipeO = cuda::make_pipeline(block, &pipeStateO);
-
     constexpr int qTileElements = D_HEAD * Q_TILE_ROWS;
     constexpr int kvTileElements = D_HEAD * KV_TILE_ROWS;
     constexpr int perThreadfragmentSizeKV = kvTileElements / WARP;
