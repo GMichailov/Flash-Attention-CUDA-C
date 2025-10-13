@@ -77,11 +77,6 @@ __global__ __forceinline__ void rowSoftmax(
 }
 
 
-__global__ __forceinline__ void rowSoftmax(
-    float& running_max, float& running_l, float& score
-) {}
-
-
 template<int ROWS_PER_WARP>
 __global__ __forceinline__ void multiplyVStoreO(
     float* __restrict__ smemV, float* __restrict__ O, float* __restrict__ OFrag,
