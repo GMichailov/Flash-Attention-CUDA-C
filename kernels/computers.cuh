@@ -89,16 +89,17 @@ __device__ __forceinline__ void twoLoaderMhaComputeWarp(
         running_max = -INFINITY;
         running_l = 0.0f;
         uint8_t bufKV = 0;
-        DBG("CMP", "QRow=%d pre-consumer_wait(Q)", globalQRow);
+        pipeQ.producer_acquire();
+        pipeQ.producer_commit();
         pipeQ.consumer_wait();
-        DBG("CMP", "QRow=%d post-consumer_wait(Q)", globalQRow);
+        pipeO.producer_acquire();
         for (int globalKVRow = 0; globalKVRow < batchSize * numHeads * seqLen; globalKVRow += KV_TILE_ROWS) {
-            DBG("CMP", "QRow=%d KVRow=%d pre-consumer_wait(K)", globalQRow, globalKVRow);
+            pipeK.producer_acquire();
+            pipeK.producer_commit();
             pipeK.consumer_wait();
-            DBG("CMP", "QRow=%d KVRow=%d post-consumer_wait(K)", globalQRow, globalKVRow);
             if (is_causal && (globalKVRow + group.meta_group_rank() > globalQRow + warp.meta_group_rank())) score = -INFINITY;
             else computeAttentionScore<Q_TILE_ROWS, KV_TILE_ROWS, D_HEAD>(smemQ[bufQ], smemK[bufKV], scale, warp, group, score);
-
+            pipeK.consumer_release();
             float curr_max;
             float curr_l;
             group.sync();
@@ -119,12 +120,11 @@ __device__ __forceinline__ void twoLoaderMhaComputeWarp(
             running_max = fmaxf(curr_max, running_max);
             // Multiply against V
             float weight = expf(score - running_max) / running_l;
-            DBG("CMP", "QRow=%d KVRow=%d pre-consumer_wait(V)", globalQRow, globalKVRow);
+            pipeV.producer_acquire();
+            pipeV.producer_commit();
             pipeV.consumer_wait();
-            DBG("CMP", "QRow=%d KVRow=%d post-consumer_wait(V)", globalQRow, globalKVRow);
             // Create mask so that thread X of each group in the warp sees each other.
             threadRankMask(group.size(), group.thread_rank(), mask);
-            pipeO.consumer_wait();
             // For each float in fragment, accumulate into thread X of group 0 which will write to corresponding smemO index.
             for (int idx = 0; idx < (D_HEAD / group.size()); ++idx) {
                 float out = weight * smemV[bufKV][static_cast<int>(warp.meta_group_rank()) * D_HEAD + static_cast<int>(group.thread_rank()) * idx];
@@ -136,9 +136,13 @@ __device__ __forceinline__ void twoLoaderMhaComputeWarp(
                     else smemO[warp.meta_group_rank() * D_HEAD + group.thread_rank() * idx] += out;
                 }
             }
-            DBG("CMP", "pre-syncthreads");
-            __syncthreads();
-            DBG("CMP", "post-syncthreads");
+            pipeV.consumer_release();
+            bufKV ^= 1;
         }
+        pipeQ.consumer_release();
+        pipeO.producer_commit();
+        pipeO.consumer_wait();
+        pipeO.consumer_release();
+        bufQ ^= 1;
     }
 }

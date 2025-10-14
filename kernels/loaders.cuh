@@ -54,7 +54,6 @@ __device__ __forceinline__ void setComputerSmemPointers(float* __restrict__ (&sm
 
 template<int TILE_SIZE>
 __device__ __forceinline__ void asyncBufferLoad(const float* __restrict__ matrix, float* __restrict__ matrixSmem, int tileOffset, int laneId, int fragmentSize, pipe_t& pipe) {
-    pipe.producer_acquire();
     int base = tileOffset + laneId * fragmentSize;
     #pragma unroll
     for (int reads = 0; reads < fragmentSize; reads += 4) {
@@ -81,12 +80,10 @@ __device__ __forceinline__ void asyncBufferLoad(const float* __restrict__ matrix
             cuda::memcpy_async(smemPtr, globalMemPtr, sizeof(float), pipe);
         }
     }
-    pipe.producer_commit();
 }
 
 
 __device__ __forceinline__ void asyncWriteO(float* __restrict__ O, float* __restrict__ smemO, int absoluteQRow, int laneId, int perThreadFragmentSizeO, pipe_t& pipeO) {
-    pipeO.producer_acquire();
     #pragma unroll
     for (int reads = 0; reads < perThreadFragmentSizeO; reads += 4) {
         int writes = min(perThreadFragmentSizeO - reads, 4);
@@ -112,46 +109,13 @@ __device__ __forceinline__ void asyncWriteO(float* __restrict__ O, float* __rest
             cuda::memcpy_async(globalPtr, smemPtr, sizeof(float), pipeO);
         }
     }
-    pipeO.producer_commit();
 }
-
-/*
-template<int D_HEAD, int BLOCK_ROWS, int ROWS_PER_WARP>
-__device__ __forceinline__ void singleLoaderWarp(
-    float* __restrict__ (&smem)[2], 
-    pipe_t pipeQ, pipe_t pipeK, pipe_t pipeV, 
-    auto block, int laneId,
-    int batchSize, int numHeads,
-    int seqLenQ, int seqLenK
-) {
-    constexpr int tileSize = D_HEAD * BLOCK_ROWS;
-    constexpr int fragmentSize = D_HEAD / (WARP / ROWS_PER_WARP);
-
-    // Set smem pointers
-    float* smemQ[2];
-    float* smemK[2];
-    float* smemV[2];
-    setLoaderSmemPointers(smemQ, smemK, smemV, tileSize);
-
-    // Iteratively load the tiles
-    int buf = 0;
-    for (int loadingOffsetQ = 0; loadingOffsetQ < seqLenQ * batchSize * numHeads; loadingOffsetQ += BLOCK_ROWS) {
-        asyncBufferLoad<QTileSize>(Q, smemQ[buf], loadingOffsetQ, laneId, fragmentSize, pipeQ);
-        for(int loadingOffsetKV = 0; loadingOffsetKV < seqLenK * batchSize * numHeads; loadingOffsetKV += BLOCK_ROWS) {
-            asyncBufferLoad<KTileSize>(K, smemK[buf], loadingOffsetKV, laneId, fragmentSize, pipeK);
-            asyncBufferLoad<KTileSize>(V, smemV[buf], loadingOffsetKV, laneId, fragmentSize, pipeV);
-            buf ^= 1;
-            // Wait for computation warps to finish calculating on the other buffer.
-            __syncthreads();
-        }
-    }
-}*/
 
 template<int D_HEAD, int Q_TILE_ROWS, int KV_TILE_ROWS>
 __device__ __forceinline__ void qvLoaderWarp(
     const float* __restrict__ Q, const float* __restrict__ V,
     auto& block, const int& batchSize, const int& numHeads, const int& seqLen,
-    auto& pipeQ, auto& pipeV
+    auto& pipeQ, auto& pipeK, auto& pipeV, auto& pipeO
 ) {
 
     constexpr int qTileElements = D_HEAD * Q_TILE_ROWS;
@@ -166,19 +130,29 @@ __device__ __forceinline__ void qvLoaderWarp(
 
     uint8_t bufQ = 0;
     for (int rowQ = 0; rowQ < batchSize * numHeads * seqLen; rowQ += Q_TILE_ROWS) {
-        DBG("QV", "rowQ=%d bufQ=%d pre-loadQ", rowQ, bufQ);
-        asyncBufferLoad<qTileElements>(Q, smemQ[bufQ], rowQ, laneId, perThreadfragmentSizeQ, pipeQ);
-        DBG("QV", "rowQ=%d bufQ=%d post-commitQ", rowQ, bufQ);
+        pipeQ.producer_acquire();
+        asyncBufferLoad<qTileElements>(Q, smemQ[bufQ], rowQ, laneId, perThreadfragmentSizeQ, pipeQ);;
+        pipeQ.producer_commit();
+        pipeQ.consumer_wait();
+        pipeO.producer_acquire();
         uint8_t bufKV = 0;
         for (int rowKV = 0; rowKV < batchSize * numHeads * seqLen; rowKV += KV_TILE_ROWS) {
-            DBG("QV", "rowQ=%d rowKV=%d bufKV=%d pre-loadV", rowQ, rowKV, bufKV);
+            pipeK.producer_acquire();
+            pipeK.producer_commit();
+            pipeK.consumer_wait();
+            pipeK.consumer_release();
+
+            pipeV.producer_acquire();
             asyncBufferLoad<kvTileElements>(V, smemV[bufKV], rowKV, laneId, perThreadfragmentSizeKV, pipeV);
-            DBG("QV", "rowQ=%d rowKV=%d bufKV=%d post-commitV", rowQ, rowKV, bufKV);
+            pipeV.producer_commit();
+            pipeV.consumer_wait();
+            pipeV.consumer_release();
             bufKV ^= 1;
-            DBG("QV", "pre-syncthreads");
-            __syncthreads();
-            DBG("QV", "post-syncthreads");
         }
+        pipeQ.consumer_release();
+        pipeO.producer_commit();
+        pipeO.consumer_wait();
+        pipeO.consumer_release();
         bufQ ^= 1;
     }
 }
@@ -187,7 +161,7 @@ template<int D_HEAD, int Q_TILE_ROWS, int KV_TILE_ROWS>
 __device__ __forceinline__ void koLoaderWarp(
     const float* __restrict__ K, float* __restrict__ O,
     auto& block, const int& batchSize, const int& numHeads, const int& seqLen,
-    auto& pipeK, auto& pipeO
+    auto& pipeQ, auto& pipeK, auto& pipeV, auto& pipeO
 ) {
     constexpr int qTileElements = D_HEAD * Q_TILE_ROWS;
     constexpr int kvTileElements = D_HEAD * KV_TILE_ROWS;
@@ -201,17 +175,28 @@ __device__ __forceinline__ void koLoaderWarp(
 
     uint8_t bufQ = 0;
     for (int rowQ = 0; rowQ < batchSize * numHeads * seqLen; rowQ += Q_TILE_ROWS) {
+        pipeQ.producer_acquire();
+        pipeQ.producer_commit();
+        pipeQ.consumer_wait();
+        pipeO.producer_acquire();
+
         for (int rowKV = 0; rowKV < batchSize * numHeads * seqLen; rowKV += KV_TILE_ROWS) {
-            DBG("KO", "rowKV=%d bufQ=%d pre-loadK", rowKV, bufQ);
+            pipeK.producer_acquire();
             asyncBufferLoad<kvTileElements>(K, smemK[bufQ], rowKV, laneId, perThreadfragmentSizeKV, pipeK);
-            DBG("KO", "rowKV=%d bufQ=%d post-commitK", rowKV, bufQ);
-            DBG("KO", "pre-syncthreads");
-            __syncthreads();
-            DBG("KO", "post-syncthreads");
+            pipeK.producer_commit();
+            pipeK.consumer_wait();
+            pipeK.consumer_release();
+            
+            pipeV.producer_acquire();
+            pipeV.producer_commit();
+            pipeV.consumer_wait();
+            pipeV.consumer_release();
         }
-        DBG("KO", "rowQ=%d pre-writeO", rowQ);
+        pipeQ.consumer_release();
+        pipeO.producer_commit();
+        pipeO.consumer_wait();
         asyncWriteO(O, smemO, rowQ, laneId, perThreadfragmentSizeO, pipeO);
-        DBG("KO", "rowQ=%d post-commitO", rowQ);
+        pipeO.consumer_release();
         bufQ ^= 1;
     }
 }

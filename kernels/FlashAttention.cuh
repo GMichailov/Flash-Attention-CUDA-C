@@ -77,8 +77,8 @@ __global__ void twoLoaderMhaFlashAttentionKernel(
     if (warpId < numWarps - 2) {
         twoLoaderMhaComputeWarp<D_HEAD, Q_TILE_ROWS, KV_TILE_ROWS>(block, batchSize, numHeads, seqLen, scale, is_causal, pipeQ, pipeK, pipeV, pipeO);
     } else if (warpId == numWarps - 2) {
-        qvLoaderWarp<D_HEAD, Q_TILE_ROWS, KV_TILE_ROWS>(Q, V, block, batchSize, numHeads, seqLen, pipeQ, pipeV);
+        qvLoaderWarp<D_HEAD, Q_TILE_ROWS, KV_TILE_ROWS>(Q, V, block, batchSize, numHeads, seqLen, pipeQ, pipeK, pipeV, pipeO);
     } else {
-        koLoaderWarp<D_HEAD, Q_TILE_ROWS, KV_TILE_ROWS>(K, O, block, batchSize, numHeads, seqLen, pipeK, pipeO);
+        koLoaderWarp<D_HEAD, Q_TILE_ROWS, KV_TILE_ROWS>(K, O, block, batchSize, numHeads, seqLen, pipeQ, pipeK, pipeV, pipeO);
     }
 }
