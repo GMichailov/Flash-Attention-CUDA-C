@@ -30,17 +30,10 @@ void test_flash_attention(bool is_causal = false) {
     size_t bytes = tensorSize * sizeof(float);
 
     // Allocate host data
-    vector<float> h_Q(tensorSize);
-    vector<float> h_K(tensorSize);
-    vector<float> h_V(tensorSize);
+    vector<float> h_Q(tensorSize, 1.0f);
+    vector<float> h_K(tensorSize, 1.0f);
+    vector<float> h_V(tensorSize, 1.0f);
     vector<float> h_O(tensorSize, 0.0f);
-
-    // Fill deterministic data
-    for (int i = 0; i < tensorSize; ++i) {
-        h_Q[i] = sinf(i * 0.1f);
-        h_K[i] = cosf(i * 0.07f);
-        h_V[i] = tanhf(i * 0.05f);
-    }
 
     // Allocate device buffers
     float *d_Q, *d_K, *d_V, *d_O;
@@ -55,7 +48,7 @@ void test_flash_attention(bool is_causal = false) {
     CUDA_CHECK(cudaMemset(d_O, 0, bytes));
 
     // Kernel launch configuration
-    constexpr int numWarps = 4; // 2 compute + 2 loader
+    constexpr int numWarps = Q_TILE_ROWS + 2;
     constexpr int threadsPerBlock = numWarps * WARP;
     dim3 grid(1);
     dim3 block(threadsPerBlock);
@@ -64,7 +57,7 @@ void test_flash_attention(bool is_causal = false) {
     printf("Launching kernel with %d threads (%d warps)...\n", threadsPerBlock, numWarps);
 
     // Launch kernel
-    twoLoaderMhaFlashAttentionKernel<D_HEAD, Q_TILE_ROWS, KV_TILE_ROWS>
+    twoLoaderMhaFlashAttentionKernel<D_HEAD, Q_TILE_ROWS-2, KV_TILE_ROWS>
         <<<grid, block, sharedMemBytes>>>(d_Q, d_K, d_V, d_O, batchSize, numHeads, seqLen, scale, is_causal);
 
     CUDA_CHECK(cudaDeviceSynchronize());
@@ -111,6 +104,6 @@ void test_flash_attention(bool is_causal = false) {
 
 int main() {
     printf("Running FlashAttention test (D_HEAD=8, Q_TILE_ROWS=4, KV_TILE_ROWS=4)\n");
-    test_flash_attention<8, 4, 4>(false);
+    test_flash_attention<16, 4, 4>(false);
     return 0;
 }

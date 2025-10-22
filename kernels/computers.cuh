@@ -2,62 +2,6 @@
 
 #include "utils.cuh"
 
-// TODO: Bring in missing vars
-/*
-template<int DHEAD, int BLOCK_ROWS, int ROWS_PER_WARP>
-__device__ __forceinline__ void singleLoaderMhaComputeWarp(
-    float* __restrict__ (&smem)[2],
-    pipe_t pipeQ, pipe_t pipeK, pipe_t pipeV, auto& block,
-    int batchSize, int numHeads, int seqLenQ, int seqLenK
-) {
-    constexpr int tileSize = DHEAD * BLOCK_ROWS;
-    constexpr int QFragmentSize = tileSize / WARP;
-
-    // Create partitions per Q row
-    auto warp = cg::tiled_partition<WARP>(block);
-    auto rowGroup = cg::tiled_partition<WARP / ROWS_PER_WARP>(warp);
-
-    // Set smem pointers needed for calculations
-    float* smemQ[2];
-    float* smemK[2];
-    float* smemV[2];
-    float* smemL;
-    float* smemM;
-    float QFrag[QFragmentSize];
-    setLoaderSmemPointers(smemQ, smemK, smemV, KTileSize, BLOCK_ROWS);
-    oneLoaderSetCalculatorAdditionalSmemPointers(smemL, smemM, tileSize, BLOCK_ROWS);
-
-    // Allocate/Store reused data.
-    int buf = 0;
-    float score;
-    float newMax;
-    float newL;
-    // Begin Iterating through tiles.
-    for(int absoluteQRow = 0; absoluteQRow < seqLenQ * batchSize * numHeads; absoluteQRow += BLOCK_ROWS) {
-        int relativeKvRow = rowGroup.thread_rank() / (WARP / ROWS_PER_WARP);
-        for (int absoluteKvRow = 0; absoluteKvRow < seqLenK * batchSize * numHeads; absoluteKvRow += BLOCK_ROWS) {
-            pipeK.consumer_wait();
-            // Each rowGroup handles its calculations
-            if (absoluteKvRow + relativeKvRow > absoluteQRow) {
-                score = -INFINITY;
-            } else {
-                computeRowNoncausalAttentionScore<ROWS_PER_WARP>(QFrag, smemK[buf], kvRow, laneId, scale, D_HEAD, QFragmentSize, rowGroup);
-            }
-            if (!rowGroup.thread_rank()) {
-                // Pass correct Q row.
-                rowSoftmax(&smemM, &smemL, , score, newMax, newL);
-            }
-            newMax = rowGroup.shfl(newMax, 0);
-            newL = rowGroup.shfl(newL, 0);
-            rowGroup.sync();
-            pipeV.consumer_wait();
-            multiplyVStoreO();
-            buf ^= 1;
-        }
-    }
-}
-*/
-
 template<int D_HEAD, int Q_TILE_ROWS, int KV_TILE_ROWS>
 __device__ __forceinline__ void twoLoaderMhaComputeWarp(
     auto& block, int batchSize, int numHeads, int seqLen, float scale, bool is_causal,
@@ -85,7 +29,6 @@ __device__ __forceinline__ void twoLoaderMhaComputeWarp(
 
     // Grab Q and stream KV against it to be able to store O stuff per warp and only keep a Q_TILE_ROWS tile for O.
     for (int globalQRow = 0; globalQRow < batchSize * numHeads * seqLen; globalQRow += Q_TILE_ROWS) {
-        score = 0.0f;
         running_max = -INFINITY;
         running_l = 0.0f;
         uint8_t bufKV = 0;
@@ -97,6 +40,7 @@ __device__ __forceinline__ void twoLoaderMhaComputeWarp(
             pipeK.producer_acquire();
             pipeK.producer_commit();
             pipeK.consumer_wait();
+            score = 0.0f;
             if (is_causal && (globalKVRow + group.meta_group_rank() > globalQRow + warp.meta_group_rank())) score = -INFINITY;
             else computeAttentionScore<Q_TILE_ROWS, KV_TILE_ROWS, D_HEAD>(smemQ[bufQ], smemK[bufKV], scale, warp, group, score);
             pipeK.consumer_release();
@@ -104,7 +48,6 @@ __device__ __forceinline__ void twoLoaderMhaComputeWarp(
             float curr_l;
             group.sync();
             // Sum group to get score and then find max score for warp.
-            score = cg::reduce(group, score, cg::plus<float>());
             curr_max = cg::reduce(warp, score, cg::greater<float>());
             // Sum up scores held by group leaders in warp and find max simultaneously.
             curr_l = (group.thread_rank() == 0) ? expf(score - curr_max) : 0.0f;
@@ -127,13 +70,13 @@ __device__ __forceinline__ void twoLoaderMhaComputeWarp(
             threadRankMask(group.size(), group.thread_rank(), mask);
             // For each float in fragment, accumulate into thread X of group 0 which will write to corresponding smemO index.
             for (int idx = 0; idx < (D_HEAD / group.size()); ++idx) {
-                float out = weight * smemV[bufKV][static_cast<int>(warp.meta_group_rank()) * D_HEAD + static_cast<int>(group.thread_rank()) * idx];
+                float out = weight * smemV[bufKV][group.meta_group_rank() * D_HEAD + group.thread_rank() * (D_HEAD / group.size()) + idx];
                 for (int offset = group.size(); offset < 32; offset += group.size()) {
                     out += __shfl_down_sync(mask, out, offset);
                 }
                 if (group.meta_group_rank() == 0) {
-                    if (globalKVRow == 0) smemO[static_cast<int>(warp.meta_group_rank()) * D_HEAD + static_cast<int>(group.thread_rank()) * idx] = out;
-                    else smemO[warp.meta_group_rank() * D_HEAD + group.thread_rank() * idx] += out;
+                    if (globalKVRow == 0) smemO[warp.meta_group_rank() * D_HEAD + group.thread_rank() * (D_HEAD / group.size()) + idx] = out;
+                    else smemO[warp.meta_group_rank() * D_HEAD + group.thread_rank() * (D_HEAD / group.size()) + idx] += out;
                 }
             }
             pipeV.consumer_release();

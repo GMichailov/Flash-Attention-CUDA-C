@@ -42,7 +42,7 @@ __device__ __forceinline__ void computeAttentionScore(
     const float scale, auto& warp, auto& group, float& score
 ) {
     uint8_t fragmentSize = D_HEAD / group.size();
-    smemQPtr += warp.meta_group_size() * D_HEAD + group.thread_rank() * fragmentSize;
+    smemQPtr += warp.meta_group_rank() * D_HEAD + group.thread_rank() * fragmentSize;
     smemKPtr += group.meta_group_rank() * D_HEAD + group.thread_rank() * fragmentSize;
     #pragma unroll
     for (int i = 0; i < fragmentSize; ++i) {

@@ -53,8 +53,8 @@ __device__ __forceinline__ void setComputerSmemPointers(float* __restrict__ (&sm
 
 
 template<int TILE_SIZE>
-__device__ __forceinline__ void asyncBufferLoad(const float* __restrict__ matrix, float* __restrict__ matrixSmem, int tileOffset, int laneId, int fragmentSize, pipe_t& pipe) {
-    int base = tileOffset + laneId * fragmentSize;
+__device__ __forceinline__ void asyncBufferLoad(const float* __restrict__ matrix, float* __restrict__ matrixSmem, int row, int D_HEAD, int laneId, int fragmentSize, pipe_t& pipe) {
+    int base = row * D_HEAD + laneId * fragmentSize;
     #pragma unroll
     for (int reads = 0; reads < fragmentSize; reads += 4) {
         int writes = min(fragmentSize - reads, 4);
@@ -82,30 +82,30 @@ __device__ __forceinline__ void asyncBufferLoad(const float* __restrict__ matrix
     }
 }
 
-
+template<int D_HEAD>
 __device__ __forceinline__ void asyncWriteO(float* __restrict__ O, float* __restrict__ smemO, int absoluteQRow, int laneId, int perThreadFragmentSizeO, pipe_t& pipeO) {
     #pragma unroll
     for (int reads = 0; reads < perThreadFragmentSizeO; reads += 4) {
         int writes = min(perThreadFragmentSizeO - reads, 4);
         if (writes == 4) {
             const float4* smemPtr = reinterpret_cast<const float4*>(smemO + laneId * perThreadFragmentSizeO + reads);
-            float4* globalPtr = reinterpret_cast<float4*>(O + laneId * perThreadFragmentSizeO + reads);
+            float4* globalPtr = reinterpret_cast<float4*>(O + absoluteQRow * D_HEAD + laneId * perThreadFragmentSizeO + reads);
             cuda::memcpy_async(globalPtr, smemPtr, sizeof(float4), pipeO);
         } else if (writes == 3) {
             const float2* smemPtr2 = reinterpret_cast<const float2*>(smemO + laneId * perThreadFragmentSizeO + reads);
-            float2* globalPtr2 = reinterpret_cast<float2*>(O + laneId * perThreadFragmentSizeO + reads);
+            float2* globalPtr2 = reinterpret_cast<float2*>(O + absoluteQRow * D_HEAD + laneId * perThreadFragmentSizeO + reads);
             cuda::memcpy_async(globalPtr2, smemPtr2, sizeof(float2), pipeO);
 
             const float* smemPtr = reinterpret_cast<const float*>(smemO + laneId * perThreadFragmentSizeO + reads + 2);
-            float* globalPtr = reinterpret_cast<float*>(O + laneId * perThreadFragmentSizeO + reads + 2);
+            float* globalPtr = reinterpret_cast<float*>(O + absoluteQRow * D_HEAD + laneId * perThreadFragmentSizeO + reads + 2);
             cuda::memcpy_async(globalPtr, smemPtr, sizeof(float), pipeO);
         } else if (writes == 2) {
             const float2* smemPtr = reinterpret_cast<const float2*>(smemO + laneId * perThreadFragmentSizeO + reads);
-            float2* globalPtr = reinterpret_cast<float2*>(O + laneId * perThreadFragmentSizeO + reads);
+            float2* globalPtr = reinterpret_cast<float2*>(O + absoluteQRow * D_HEAD + laneId * perThreadFragmentSizeO + reads);
             cuda::memcpy_async(globalPtr, smemPtr, sizeof(float2), pipeO);
         } else {
             const float* smemPtr = reinterpret_cast<const float*>(smemO + laneId * perThreadFragmentSizeO + reads);
-            float* globalPtr = reinterpret_cast<float*>(O + laneId * perThreadFragmentSizeO + reads);
+            float* globalPtr = reinterpret_cast<float*>(O + absoluteQRow * D_HEAD + laneId * perThreadFragmentSizeO + reads);
             cuda::memcpy_async(globalPtr, smemPtr, sizeof(float), pipeO);
         }
     }
@@ -131,7 +131,7 @@ __device__ __forceinline__ void qvLoaderWarp(
     uint8_t bufQ = 0;
     for (int rowQ = 0; rowQ < batchSize * numHeads * seqLen; rowQ += Q_TILE_ROWS) {
         pipeQ.producer_acquire();
-        asyncBufferLoad<qTileElements>(Q, smemQ[bufQ], rowQ, laneId, perThreadfragmentSizeQ, pipeQ);;
+        asyncBufferLoad<qTileElements>(Q, smemQ[bufQ], rowQ, D_HEAD, laneId, perThreadfragmentSizeQ, pipeQ);;
         pipeQ.producer_commit();
         pipeQ.consumer_wait();
         pipeO.producer_acquire();
@@ -143,7 +143,7 @@ __device__ __forceinline__ void qvLoaderWarp(
             pipeK.consumer_release();
 
             pipeV.producer_acquire();
-            asyncBufferLoad<kvTileElements>(V, smemV[bufKV], rowKV, laneId, perThreadfragmentSizeKV, pipeV);
+            asyncBufferLoad<kvTileElements>(V, smemV[bufKV], rowKV, D_HEAD, laneId, perThreadfragmentSizeKV, pipeV);
             pipeV.producer_commit();
             pipeV.consumer_wait();
             pipeV.consumer_release();
@@ -179,10 +179,10 @@ __device__ __forceinline__ void koLoaderWarp(
         pipeQ.producer_commit();
         pipeQ.consumer_wait();
         pipeO.producer_acquire();
-
+        uint8_t bufKV = 0;
         for (int rowKV = 0; rowKV < batchSize * numHeads * seqLen; rowKV += KV_TILE_ROWS) {
             pipeK.producer_acquire();
-            asyncBufferLoad<kvTileElements>(K, smemK[bufQ], rowKV, laneId, perThreadfragmentSizeKV, pipeK);
+            asyncBufferLoad<kvTileElements>(K, smemK[bufKV], rowKV, D_HEAD, laneId, perThreadfragmentSizeKV, pipeK);
             pipeK.producer_commit();
             pipeK.consumer_wait();
             pipeK.consumer_release();
@@ -191,11 +191,12 @@ __device__ __forceinline__ void koLoaderWarp(
             pipeV.producer_commit();
             pipeV.consumer_wait();
             pipeV.consumer_release();
+            bufKV ^= 1;
         }
         pipeQ.consumer_release();
         pipeO.producer_commit();
         pipeO.consumer_wait();
-        asyncWriteO(O, smemO, rowQ, laneId, perThreadfragmentSizeO, pipeO);
+        asyncWriteO<D_HEAD>(O, smemO, rowQ, laneId, perThreadfragmentSizeO, pipeO);
         pipeO.consumer_release();
         bufQ ^= 1;
     }
