@@ -24,14 +24,15 @@ __device__ __forceinline__ void twoLoaderMhaComputeWarp(
     // Allocate/Store reused data.
     uint8_t bufQ = 0;
     float score;
-    float running_max;
-    float running_l;
+    float running_max, running_l;
+    float prev_max, prev_l;
 
     // Grab Q and stream KV against it to be able to store O stuff per warp and only keep a Q_TILE_ROWS tile for O.
     for (int globalQRow = 0; globalQRow < batchSize * numHeads * seqLen; globalQRow += Q_TILE_ROWS) {
         running_max = -INFINITY;
         running_l = 0.0f;
         uint8_t bufKV = 0;
+
         pipeQ.producer_acquire();
         pipeQ.producer_commit();
         pipeQ.consumer_wait();
@@ -47,13 +48,16 @@ __device__ __forceinline__ void twoLoaderMhaComputeWarp(
             float curr_max;
             float curr_l;
             group.sync();
+            
+            prev_max = running_max;
+            prev_l = running_l;
             // Sum group to get score and then find max score for warp.
             curr_max = cg::reduce(warp, score, cg::greater<float>());
             // Sum up scores held by group leaders in warp and find max simultaneously.
             curr_l = (group.thread_rank() == 0) ? expf(score - curr_max) : 0.0f;
             unsigned mask = groupLeaderMask(group.size());
             #pragma unroll
-            for (int offset = 16; offset > 0; offset >>= 1) {
+            for (int offset = group.size(); offset < WARP; offset += group.size()) {
                 curr_l += __shfl_down_sync(mask, curr_l, offset);
             }
             // Caculate the actual l itself in thread 0.
@@ -61,8 +65,7 @@ __device__ __forceinline__ void twoLoaderMhaComputeWarp(
             // Broadcast out the newly calculated l to all warp threads.
             running_l = __shfl_sync(0xFFFFFFFF, curr_l, 0);
             running_max = fmaxf(curr_max, running_max);
-            // Multiply against V
-            float weight = expf(score - running_max) / running_l;
+            
             pipeV.producer_acquire();
             pipeV.producer_commit();
             pipeV.consumer_wait();
@@ -75,8 +78,9 @@ __device__ __forceinline__ void twoLoaderMhaComputeWarp(
                     out += __shfl_down_sync(mask, out, offset);
                 }
                 if (group.meta_group_rank() == 0) {
-                    if (globalKVRow == 0) smemO[warp.meta_group_rank() * D_HEAD + group.thread_rank() * (D_HEAD / group.size()) + idx] = out;
-                    else smemO[warp.meta_group_rank() * D_HEAD + group.thread_rank() * (D_HEAD / group.size()) + idx] += out;
+                    int oIdx = warp.meta_group_rank() * D_HEAD + group.thread_rank() * (D_HEAD / group.size()) + idx;
+                    if (globalKVRow == 0) smemO[oIdx] = out;
+                    else smemO[oIdx] = expf(prev_max - running_max) * (prev_l / running_l) * smemO[oIdx] + out;
                 }
             }
             pipeV.consumer_release();

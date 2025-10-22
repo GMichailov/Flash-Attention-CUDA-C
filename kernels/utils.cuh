@@ -11,9 +11,6 @@ namespace cg = cooperative_groups;
 
 #define WARP 32
 #define FLOAT_SIZE 4
-#define DBG(role, fmt, ...) \
-  if (blockIdx.x==0 && (threadIdx.x % WARP)==0) \
-    printf("[%s] b%d w%d: " fmt "\n", role, blockIdx.x, threadIdx.x/WARP, ##__VA_ARGS__)
 
 using pipe_t = cuda::pipeline<cuda::thread_scope_block>;
 
