@@ -56,10 +56,10 @@ __global__ void threeLoaderMhaFlashAttentionKernel(
     int BLOCK_KV_ROWS, bool is_causal
 );*/
 
-template<int D_HEAD, int Q_TILE_ROWS, int KV_TILE_ROWS>
+template<int D_HEAD, int Q_TILE_ROWS, int KV_TILE_ROWS, typename scalar_t>
 __global__ void twoLoaderMhaFlashAttentionKernel(
-    const float* __restrict__ Q, const float* __restrict__ K, const float* __restrict__ V, float* __restrict__ O,
-    int batchSize, int numHeads, int seqLen, float scale, bool is_causal
+    const scalar_t* __restrict__ Q, const scalar_t* __restrict__ K, const scalar_t* __restrict__ V, scalar_t* __restrict__ O,
+    int batchSize, int numHeads, int seqLen, scalar_t scale, bool is_causal
 )
 {
     auto block = cg::this_thread_block();
@@ -75,10 +75,10 @@ __global__ void twoLoaderMhaFlashAttentionKernel(
     auto pipeO = cuda::make_pipeline(block, &pipeStateO);
     // Split off loader warps
     if (warpId < numWarps - 2) {
-        twoLoaderMhaComputeWarp<D_HEAD, Q_TILE_ROWS, KV_TILE_ROWS>(block, batchSize, numHeads, seqLen, scale, is_causal, pipeQ, pipeK, pipeV, pipeO);
+        twoLoaderMhaComputeWarp<D_HEAD, Q_TILE_ROWS, KV_TILE_ROWS, scalar_t>(block, batchSize, numHeads, seqLen, scale, is_causal, pipeQ, pipeK, pipeV, pipeO);
     } else if (warpId == numWarps - 2) {
-        qvLoaderWarp<D_HEAD, Q_TILE_ROWS, KV_TILE_ROWS>(Q, V, block, batchSize, numHeads, seqLen, pipeQ, pipeK, pipeV, pipeO);
+        qvLoaderWarp<D_HEAD, Q_TILE_ROWS, KV_TILE_ROWS, scalar_t>(Q, V, block, batchSize, numHeads, seqLen, pipeQ, pipeK, pipeV, pipeO);
     } else {
-        koLoaderWarp<D_HEAD, Q_TILE_ROWS, KV_TILE_ROWS>(K, O, block, batchSize, numHeads, seqLen, pipeQ, pipeK, pipeV, pipeO);
+        koLoaderWarp<D_HEAD, Q_TILE_ROWS, KV_TILE_ROWS, scalar_t>(K, O, block, batchSize, numHeads, seqLen, pipeQ, pipeK, pipeV, pipeO);
     }
 }
