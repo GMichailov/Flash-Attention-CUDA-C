@@ -57,7 +57,7 @@ void test_flash_attention(bool is_causal = false) {
     printf("Launching kernel with %d threads (%d warps)...\n", threadsPerBlock, numWarps);
 
     // Launch kernel
-    twoLoaderMhaFlashAttentionKernel<D_HEAD, Q_TILE_ROWS-2, KV_TILE_ROWS>
+    twoLoaderMhaFlashAttentionKernel<D_HEAD, Q_TILE_ROWS-2, KV_TILE_ROWS, float>
         <<<grid, block, sharedMemBytes>>>(d_Q, d_K, d_V, d_O, batchSize, numHeads, seqLen, scale, is_causal);
 
     CUDA_CHECK(cudaDeviceSynchronize());
