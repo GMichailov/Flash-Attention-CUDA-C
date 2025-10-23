@@ -53,9 +53,10 @@ __device__ __forceinline__ void setComputerSmemPointers(scalar_t* __restrict__ (
     setKOSmemPointers(smemK, smemO, qTileElements, kvTileElements);
 }
 
-
-template<int TILE_SIZE, typename scalar_t>
-__device__ __forceinline__ void asyncBufferLoad(const scalar_t* __restrict__ matrix, scalar_t* __restrict__ matrixSmem, int row, int D_HEAD, int laneId, int fragmentSize, pipe_t& pipe) {
+//=====================================================================================================================================
+// Untested since multitype switch.
+template<int TILE_SIZE, typename scalar_t, typename scalar_t2>
+__device__ __forceinline__ void asyncBufferLoadManual(const float* __restrict__ matrix, float* __restrict__ matrixSmem, int row, int D_HEAD, int laneId, int fragmentSize, pipe_t& pipe) {
     int base = row * D_HEAD + laneId * fragmentSize;
     #pragma unroll
     for (int reads = 0; reads < fragmentSize; reads += 4) {
@@ -84,8 +85,28 @@ __device__ __forceinline__ void asyncBufferLoad(const scalar_t* __restrict__ mat
     }
 }
 
-template<int D_HEAD, typename scalar_t>
-__device__ __forceinline__ void asyncWriteO(scalar_t* __restrict__ O, scalar_t* __restrict__ smemO, int absoluteQRow, int laneId, int perThreadFragmentSizeO, pipe_t& pipeO) {
+
+template<int TILE_SIZE, typename scalar_t, typename scalar_t2>
+__device__ __forceinline__ void asyncBufferLoadManual(const scalar_t* __restrict__ matrix, scalar_t* __restrict__ matrixSmem, int row, int D_HEAD, int laneId, int fragmentSize, pipe_t& pipe) {
+    int base = row * D_HEAD + laneId * fragmentSize;
+    #pragma unroll
+    for (int reads = 0; reads < fragmentSize; reads += 4) {
+        int writes = min(fragmentSize - reads, 4);
+        if (writes == 2) {
+            const scalar_t2* globalMemPtr = reinterpret_cast<const scalar_t2*>(matrix + base + reads);
+            scalar_t2* smemPtr = reinterpret_cast<scalar_t2*>(matrixSmem + laneId * fragmentSize + reads);
+            cuda::memcpy_async(smemPtr, globalMemPtr, sizeof(scalar_t2), pipe);
+        } else {
+            const scalar_t* globalMemPtr = reinterpret_cast<const scalar_t*>(matrix + base + reads);
+            scalar_t* smemPtr = reinterpret_cast<scalar_t*>(matrixSmem + laneId * fragmentSize + reads);
+            cuda::memcpy_async(smemPtr, globalMemPtr, sizeof(scalar_t), pipe);
+        }
+    }
+}
+
+
+template<int D_HEAD, typename scalar_t, typename scalar_t2>
+__device__ __forceinline__ void asyncWriteOManual(float* __restrict__ O, float* __restrict__ smemO, int absoluteQRow, int laneId, int perThreadFragmentSizeO, pipe_t& pipeO) {
     #pragma unroll
     for (int reads = 0; reads < perThreadFragmentSizeO; reads += 4) {
         int writes = min(perThreadFragmentSizeO - reads, 4);
@@ -112,6 +133,43 @@ __device__ __forceinline__ void asyncWriteO(scalar_t* __restrict__ O, scalar_t* 
         }
     }
 }
+
+
+template<int D_HEAD, typename scalar_t, typename scalar_t2>
+__device__ __forceinline__ void asyncWriteOManual(scalar_t* __restrict__ O, scalar_t* __restrict__ smemO, int absoluteQRow, int laneId, int perThreadFragmentSizeO, pipe_t& pipeO) {
+    #pragma unroll
+    for (int reads = 0; reads < perThreadFragmentSizeO; reads += 2) {
+        int writes = min(perThreadFragmentSizeO - reads, 2);
+        if (writes == 2) {
+            const scalar_t2* smemPtr = reinterpret_cast<const scalar_t2*>(smemO + laneId * perThreadFragmentSizeO + reads);
+            scalar_t2* globalPtr = reinterpret_cast<scalar_t2*>(O + absoluteQRow * D_HEAD + laneId * perThreadFragmentSizeO + reads);
+            cuda::memcpy_async(globalPtr, smemPtr, sizeof(scalar_t2), pipeO);
+        } else {
+            const scalar_t* smemPtr = reinterpret_cast<const scalar_t*>(smemO + laneId * perThreadFragmentSizeO + reads);
+            scalar_t* globalPtr = reinterpret_cast<scalar_t*>(O + absoluteQRow * D_HEAD + laneId * perThreadFragmentSizeO + reads);
+            cuda::memcpy_async(globalPtr, smemPtr, sizeof(scalar_t), pipeO);
+        }
+    }
+}
+//======================================================================================================================================
+
+
+template<int TILE_SIZE, typename scalar_t>
+__device__ __forceinline__ void asyncBufferLoad(const scalar_t* __restrict__ matrix, scalar_t* __restrict__ matrixSmem, int row, int D_HEAD, int laneId, int fragmentSize, pipe_t& pipe) {
+    int base = row * D_HEAD + laneId * fragmentSize;
+    const scalar_t* globalMemPtr = reinterpret_cast<const scalar_t*>(matrix + base);
+    scalar_t* smemPtr = reinterpret_cast<scalar_t*>(matrixSmem + laneId * fragmentSize);
+    cuda::memcpy_async(smemPtr, globalMemPtr, sizeof(scalar_t) * fragmentSize, pipe);
+}
+
+
+template<int D_HEAD, typename scalar_t>
+__device__ __forceinline__ void asyncWriteO(scalar_t* __restrict__ O, scalar_t* __restrict__ smemO, int absoluteQRow, int laneId, int perThreadFragmentSizeO, pipe_t& pipeO) {
+    const scalar_t* smemPtr = reinterpret_cast<const scalar_t*>(smemO + laneId * perThreadFragmentSizeO);
+    scalar_t* globalPtr = reinterpret_cast<scalar_t*>(O + absoluteQRow * D_HEAD + laneId * perThreadFragmentSizeO);
+    cuda::memcpy_async(globalPtr, smemPtr, sizeof(scalar_t) * perThreadFragmentSizeO, pipeO);
+}
+
 
 template<int D_HEAD, int Q_TILE_ROWS, int KV_TILE_ROWS, typename scalar_t>
 __device__ __forceinline__ void qvLoaderWarp(
