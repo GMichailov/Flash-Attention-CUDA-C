@@ -26,6 +26,7 @@ __device__ __forceinline__ void twoLoaderMhaComputeWarp(
     float score;
     float running_max, running_l;
     float prev_max, prev_l;
+    float curr_max, curr_l;
 
     // Grab Q and stream KV against it to be able to store O stuff per warp and only keep a Q_TILE_ROWS tile for O.
     for (int globalQRow = 0; globalQRow < batchSize * numHeads * seqLen; globalQRow += Q_TILE_ROWS) {
@@ -45,8 +46,6 @@ __device__ __forceinline__ void twoLoaderMhaComputeWarp(
             if (is_causal && (globalKVRow + group.meta_group_rank() > globalQRow + warp.meta_group_rank())) score = -INFINITY;
             else computeAttentionScore<Q_TILE_ROWS, KV_TILE_ROWS, D_HEAD>(smemQ[bufQ], smemK[bufKV], scale, warp, group, score);
             pipeK.consumer_release();
-            float curr_max;
-            float curr_l;
             group.sync();
             
             prev_max = running_max;
@@ -65,25 +64,16 @@ __device__ __forceinline__ void twoLoaderMhaComputeWarp(
             // Broadcast out the newly calculated l to all warp threads.
             running_l = __shfl_sync(0xFFFFFFFF, curr_l, 0);
             running_max = fmaxf(curr_max, running_max);
+
             float weight = expf(score - running_max) / running_l;
+            float scaling_factor = expf(prev_max - running_max) * (prev_l / running_l);
             
             pipeV.producer_acquire();
             pipeV.producer_commit();
             pipeV.consumer_wait();
-            // Create mask so that thread X of each group in the warp sees each other.
-            threadRankMask(group.size(), group.thread_rank(), mask);
-            // For each float in fragment, accumulate into thread X of group 0 which will write to corresponding smemO index.
-            for (int idx = 0; idx < (D_HEAD / group.size()); ++idx) {
-                float out = weight * smemV[bufKV][group.meta_group_rank() * D_HEAD + group.thread_rank() * (D_HEAD / group.size()) + idx];
-                for (int offset = group.size(); offset < 32; offset += group.size()) {
-                    out += __shfl_down_sync(mask, out, offset);
-                }
-                if (group.meta_group_rank() == 0) {
-                    int oIdx = warp.meta_group_rank() * D_HEAD + group.thread_rank() * (D_HEAD / group.size()) + idx;
-                    if (globalKVRow == 0) smemO[oIdx] = out;
-                    else smemO[oIdx] = expf(prev_max - running_max) * (prev_l / running_l) * smemO[oIdx] + out;
-                }
-            }
+            
+            multiplyVAccumulateO<D_HEAD>(smemV[bufKV], smemO, warp, group, mask, weight, scaling_factor, globalKVRow);
+
             pipeV.consumer_release();
             bufKV ^= 1;
         }

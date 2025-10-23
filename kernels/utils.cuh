@@ -68,39 +68,27 @@ __device__ __forceinline__ void threadRankMask(int group_size, int group_thread_
     }
 }
 
-/*
-__device__ __forceinline__ void rowSoftmax(
-    float* __restrict__ smemM, float* __restrict__ smemL, 
-    int qRow, float score, float& newMax, float& newL
-) {
-    newMax = fmaxf(smemM[qRow], score);
-    newL = smemL[qRow] * expf(smemM[qRow] - newMax) + expf(score - newMax);
-}
 
 
-template<int ROWS_PER_WARP>
-__device__ __forceinline__ void multiplyVStoreO(
-    float* __restrict__ smemV, float* __restrict__ O, float* __restrict__ OFrag,
-    float* __restrict__ smemL, float* __restrict__ smemM, 
-    int QFragmentSize, int qIdx, int qRow, int kvRow, const float& score,
-    const float& newMax, const float& newL,
-    cg::thread_block_tile<WARP / ROWS_PER_WARP>& rowGroup
+
+template<int D_HEAD>
+__device__ __forceinline__ void multiplyVAccumulateO(
+    float* smemVBuf, float* smemO,
+    const auto& warp, const auto& group, 
+    unsigned& mask, const float& weight, float& scaling_factor, int& globalKVRow
 ) {
-    float* vPtr = &smemV[kvRow + rowGroup.thread_rank() * QFragmentSize];
-    float* oPtr = O[qIdx];
-    float weight = expf(score - newMax) / newL;
-    float rescale = smemL[qRow] * expf(smemM[qRow] - newMax) / newL;
-    #pragma unroll
-    for(int i = 0; i < QFragmentSize; ++i) {
-        oPtr[i] = oPtr[i] * rescale + weight * vPtr[i];
+    // Create mask so that thread X of each group in the warp sees each other.
+    threadRankMask(group.size(), group.thread_rank(), mask);
+    // For each float in fragment, accumulate into thread X of group 0 which will write to corresponding smemO index.
+    for (int idx = 0; idx < (D_HEAD / group.size()); ++idx) {
+        float out = weight * smemVBuf[group.meta_group_rank() * D_HEAD + group.thread_rank() * (D_HEAD / group.size()) + idx];
+        for (int offset = group.size(); offset < WARP; offset += group.size()) {
+            out += __shfl_down_sync(mask, out, offset);
+        }
+        if (group.meta_group_rank() == 0) {
+            int oIdx = warp.meta_group_rank() * D_HEAD + group.thread_rank() * (D_HEAD / group.size()) + idx;
+            if (globalKVRow == 0) smemO[oIdx] = out;
+            else smemO[oIdx] = scaling_factor * smemO[oIdx] + out;
+        }
     }
 }
-*/
-__device__ __forceinline__ void updateML(
-    float* __restrict__ smemL, float* __restrict__ smemM,
-    int qRow, const float& newL, const float& newMax
-) {
-    smemL[qRow] = newL;
-    smemM[qRow] = newMax;
-}
-
