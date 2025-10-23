@@ -65,6 +65,7 @@ __device__ __forceinline__ void twoLoaderMhaComputeWarp(
             // Broadcast out the newly calculated l to all warp threads.
             running_l = __shfl_sync(0xFFFFFFFF, curr_l, 0);
             running_max = fmaxf(curr_max, running_max);
+            float weight = expf(score - running_max) / running_l;
             
             pipeV.producer_acquire();
             pipeV.producer_commit();
