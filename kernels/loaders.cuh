@@ -20,8 +20,9 @@ __device__ __forceinline__ void oneLoaderSetSmemPointers(float* __restrict__ (&s
 }
 
 
-__device__ __forceinline__ void setQVSmemPointers(float* __restrict__ (&smemQ)[2], float* __restrict__ (&smemV)[2], int qTileElements, int kvTileElements) {
-    extern __shared__ float smem[];
+template<typename scalar_t>
+__device__ __forceinline__ void setQVSmemPointers(scalar_t* __restrict__ (&smemQ)[2], scalar_t* __restrict__ (&smemV)[2], int qTileElements, int kvTileElements) {
+    extern __shared__ scalar_t smem[];
     smemQ[0] = smem;
     smemQ[1] = smemQ[0] + qTileElements;
     smemV[0] = smem + 2 * qTileElements + 2 * kvTileElements;
@@ -29,8 +30,9 @@ __device__ __forceinline__ void setQVSmemPointers(float* __restrict__ (&smemQ)[2
 }
 
 
-__device__ __forceinline__ void setKOSmemPointers(float* __restrict__ (&smemK)[2], float* __restrict__ (&smemO), int qTileElements, int kvTileElements) {
-    extern __shared__ float smem[];
+template<typename scalar_t>
+__device__ __forceinline__ void setKOSmemPointers(scalar_t* __restrict__ (&smemK)[2], scalar_t* __restrict__ (&smemO), int qTileElements, int kvTileElements) {
+    extern __shared__ scalar_t smem[];
     smemK[0] = smem + 2 * qTileElements;
     smemK[1] = smemK[0] + kvTileElements;
     smemO = smem + 2 * qTileElements + 4 * kvTileElements;
@@ -45,15 +47,15 @@ __device__ __forceinline__ void oneLoaderSetCalculatorAdditionalSmemPointers(flo
     M = smem + offset;
 }
 
-
-__device__ __forceinline__ void setComputerSmemPointers(float* __restrict__ (&smemQ)[2], float* __restrict__ (&smemK)[2], float* __restrict__ (&smemV)[2], float* __restrict__ &smemO, int qTileElements, int kvTileElements) {
+template<typename scalar_t>
+__device__ __forceinline__ void setComputerSmemPointers(scalar_t* __restrict__ (&smemQ)[2], scalar_t* __restrict__ (&smemK)[2], scalar_t* __restrict__ (&smemV)[2], scalar_t* __restrict__ &smemO, int qTileElements, int kvTileElements) {
     setQVSmemPointers(smemQ, smemV, qTileElements, kvTileElements);
     setKOSmemPointers(smemK, smemO, qTileElements, kvTileElements);
 }
 
 
-template<int TILE_SIZE>
-__device__ __forceinline__ void asyncBufferLoad(const float* __restrict__ matrix, float* __restrict__ matrixSmem, int row, int D_HEAD, int laneId, int fragmentSize, pipe_t& pipe) {
+template<int TILE_SIZE, typename scalar_t>
+__device__ __forceinline__ void asyncBufferLoad(const scalar_t* __restrict__ matrix, scalar_t* __restrict__ matrixSmem, int row, int D_HEAD, int laneId, int fragmentSize, pipe_t& pipe) {
     int base = row * D_HEAD + laneId * fragmentSize;
     #pragma unroll
     for (int reads = 0; reads < fragmentSize; reads += 4) {
@@ -82,8 +84,8 @@ __device__ __forceinline__ void asyncBufferLoad(const float* __restrict__ matrix
     }
 }
 
-template<int D_HEAD>
-__device__ __forceinline__ void asyncWriteO(float* __restrict__ O, float* __restrict__ smemO, int absoluteQRow, int laneId, int perThreadFragmentSizeO, pipe_t& pipeO) {
+template<int D_HEAD, typename scalar_t>
+__device__ __forceinline__ void asyncWriteO(scalar_t* __restrict__ O, scalar_t* __restrict__ smemO, int absoluteQRow, int laneId, int perThreadFragmentSizeO, pipe_t& pipeO) {
     #pragma unroll
     for (int reads = 0; reads < perThreadFragmentSizeO; reads += 4) {
         int writes = min(perThreadFragmentSizeO - reads, 4);
@@ -111,9 +113,9 @@ __device__ __forceinline__ void asyncWriteO(float* __restrict__ O, float* __rest
     }
 }
 
-template<int D_HEAD, int Q_TILE_ROWS, int KV_TILE_ROWS>
+template<int D_HEAD, int Q_TILE_ROWS, int KV_TILE_ROWS, typename scalar_t>
 __device__ __forceinline__ void qvLoaderWarp(
-    const float* __restrict__ Q, const float* __restrict__ V,
+    const scalar_t* __restrict__ Q, const scalar_t* __restrict__ V,
     auto& block, const int& batchSize, const int& numHeads, const int& seqLen,
     auto& pipeQ, auto& pipeK, auto& pipeV, auto& pipeO
 ) {
@@ -124,14 +126,14 @@ __device__ __forceinline__ void qvLoaderWarp(
     constexpr int perThreadfragmentSizeKV = kvTileElements / WARP;
     uint8_t laneId = threadIdx.x % 32;
 
-    float* smemQ[2];
-    float* smemV[2];
-    setQVSmemPointers(smemQ, smemV, qTileElements, kvTileElements);
+    scalar_t* smemQ[2];
+    scalar_t* smemV[2];
+    setQVSmemPointers<scalar_t>(smemQ, smemV, qTileElements, kvTileElements);
 
     uint8_t bufQ = 0;
     for (int rowQ = 0; rowQ < batchSize * numHeads * seqLen; rowQ += Q_TILE_ROWS) {
         pipeQ.producer_acquire();
-        asyncBufferLoad<qTileElements>(Q, smemQ[bufQ], rowQ, D_HEAD, laneId, perThreadfragmentSizeQ, pipeQ);;
+        asyncBufferLoad<qTileElements, scalar_t>(Q, smemQ[bufQ], rowQ, D_HEAD, laneId, perThreadfragmentSizeQ, pipeQ);;
         pipeQ.producer_commit();
         pipeQ.consumer_wait();
         pipeO.producer_acquire();
@@ -143,7 +145,7 @@ __device__ __forceinline__ void qvLoaderWarp(
             pipeK.consumer_release();
 
             pipeV.producer_acquire();
-            asyncBufferLoad<kvTileElements>(V, smemV[bufKV], rowKV, D_HEAD, laneId, perThreadfragmentSizeKV, pipeV);
+            asyncBufferLoad<kvTileElements, scalar_t>(V, smemV[bufKV], rowKV, D_HEAD, laneId, perThreadfragmentSizeKV, pipeV);
             pipeV.producer_commit();
             pipeV.consumer_wait();
             pipeV.consumer_release();
@@ -157,9 +159,9 @@ __device__ __forceinline__ void qvLoaderWarp(
     }
 }
 
-template<int D_HEAD, int Q_TILE_ROWS, int KV_TILE_ROWS>
+template<int D_HEAD, int Q_TILE_ROWS, int KV_TILE_ROWS, typename scalar_t>
 __device__ __forceinline__ void koLoaderWarp(
-    const float* __restrict__ K, float* __restrict__ O,
+    const scalar_t* __restrict__ K, scalar_t* __restrict__ O,
     auto& block, const int& batchSize, const int& numHeads, const int& seqLen,
     auto& pipeQ, auto& pipeK, auto& pipeV, auto& pipeO
 ) {
@@ -169,9 +171,9 @@ __device__ __forceinline__ void koLoaderWarp(
     constexpr int perThreadfragmentSizeO = qTileElements / WARP; // O is same size as the Q Tile.
     uint8_t laneId = threadIdx.x % 32;
 
-    float* smemK[2];
-    float* smemO;
-    setKOSmemPointers(smemK, smemO, qTileElements, kvTileElements);
+    scalar_t* smemK[2];
+    scalar_t* smemO;
+    setKOSmemPointers<scalar_t>(smemK, smemO, qTileElements, kvTileElements);
 
     uint8_t bufQ = 0;
     for (int rowQ = 0; rowQ < batchSize * numHeads * seqLen; rowQ += Q_TILE_ROWS) {
@@ -182,7 +184,7 @@ __device__ __forceinline__ void koLoaderWarp(
         uint8_t bufKV = 0;
         for (int rowKV = 0; rowKV < batchSize * numHeads * seqLen; rowKV += KV_TILE_ROWS) {
             pipeK.producer_acquire();
-            asyncBufferLoad<kvTileElements>(K, smemK[bufKV], rowKV, D_HEAD, laneId, perThreadfragmentSizeKV, pipeK);
+            asyncBufferLoad<kvTileElements, scalar_t>(K, smemK[bufKV], rowKV, D_HEAD, laneId, perThreadfragmentSizeKV, pipeK);
             pipeK.producer_commit();
             pipeK.consumer_wait();
             pipeK.consumer_release();
@@ -196,7 +198,7 @@ __device__ __forceinline__ void koLoaderWarp(
         pipeQ.consumer_release();
         pipeO.producer_commit();
         pipeO.consumer_wait();
-        asyncWriteO<D_HEAD>(O, smemO, rowQ, laneId, perThreadfragmentSizeO, pipeO);
+        asyncWriteO<D_HEAD, scalar_t>(O, smemO, rowQ, laneId, perThreadfragmentSizeO, pipeO);
         pipeO.consumer_release();
         bufQ ^= 1;
     }
