@@ -2,7 +2,7 @@
 
 #include "utils.cuh"
 
-template<int D_HEAD, int Q_TILE_ROWS, int KV_TILE_ROWS>
+template<int D_HEAD, int Q_TILE_ROWS, int KV_TILE_ROWS, typename scalar_t>
 __device__ __forceinline__ void twoLoaderMhaComputeWarp(
     auto& block, int batchSize, int numHeads, int seqLen, float scale, bool is_causal,
     auto& pipeQ, auto& pipeK, auto& pipeV, auto& pipeO
@@ -15,18 +15,18 @@ __device__ __forceinline__ void twoLoaderMhaComputeWarp(
     auto group = cg::tiled_partition<WARP / KV_TILE_ROWS>(warp);
 
     // Set smem pointers needed for calculations
-    float* smemQ[2];
-    float* smemK[2];
-    float* smemV[2];
-    float* smemO;
-    setComputerSmemPointers(smemQ, smemK, smemV, smemO, qTileElements, kvTileElements);
+    scalar_t* smemQ[2];
+    scalar_t* smemK[2];
+    scalar_t* smemV[2];
+    scalar_t* smemO;
+    setComputerSmemPointers<scalar_t>(smemQ, smemK, smemV, smemO, qTileElements, kvTileElements);
 
     // Allocate/Store reused data.
     uint8_t bufQ = 0;
-    float score, weight, scaling_factor;
-    float running_max, running_l;
-    float prev_max, prev_l;
-    float curr_max, curr_l;
+    scalar_t score, weight, scaling_factor;
+    scalar_t running_max, running_l;
+    scalar_t prev_max, prev_l;
+    scalar_t curr_max, curr_l;
     unsigned mask;
 
     // Grab Q and stream KV against it to be able to store O stuff per warp and only keep a Q_TILE_ROWS tile for O.
@@ -44,18 +44,18 @@ __device__ __forceinline__ void twoLoaderMhaComputeWarp(
             pipeK.producer_commit();
             pipeK.consumer_wait();
 
-            score = computeTileScore<D_HEAD, Q_TILE_ROWS, KV_TILE_ROWS, float>(smemQ[bufQ], smemV[bufKV], scale, is_causal, globalQRow, globalKVRow, warp, group);
+            score = computeTileScore<D_HEAD, Q_TILE_ROWS, KV_TILE_ROWS, scalar_t>(smemQ[bufQ], smemV[bufKV], scale, is_causal, globalQRow, globalKVRow, warp, group);
 
             pipeK.consumer_release();
             group.sync();
             
-            updateSoftmaxState<float>(score, mask, prev_max, prev_l, running_max, running_l, curr_max, curr_l, weight, scaling_factor, warp, group);
+            updateSoftmaxState<scalar_t>(score, mask, prev_max, prev_l, running_max, running_l, curr_max, curr_l, weight, scaling_factor, warp, group);
             
             pipeV.producer_acquire();
             pipeV.producer_commit();
             pipeV.consumer_wait();
             
-            multiplyVAccumulateO<D_HEAD, float>(smemV[bufKV], smemO, warp, group, mask, weight, scaling_factor, globalKVRow);
+            multiplyVAccumulateO<D_HEAD, scalar_t>(smemV[bufKV], smemO, warp, group, mask, weight, scaling_factor, globalKVRow);
 
             pipeV.consumer_release();
             bufKV ^= 1;
