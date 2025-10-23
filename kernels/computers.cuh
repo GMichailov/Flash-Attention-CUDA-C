@@ -23,10 +23,11 @@ __device__ __forceinline__ void twoLoaderMhaComputeWarp(
 
     // Allocate/Store reused data.
     uint8_t bufQ = 0;
-    float score;
+    float score, weight, scaling_factor;
     float running_max, running_l;
     float prev_max, prev_l;
     float curr_max, curr_l;
+    unsigned mask;
 
     // Grab Q and stream KV against it to be able to store O stuff per warp and only keep a Q_TILE_ROWS tile for O.
     for (int globalQRow = 0; globalQRow < batchSize * numHeads * seqLen; globalQRow += Q_TILE_ROWS) {
@@ -48,24 +49,7 @@ __device__ __forceinline__ void twoLoaderMhaComputeWarp(
             pipeK.consumer_release();
             group.sync();
             
-            prev_max = running_max;
-            prev_l = running_l;
-            // Sum group to get score and then find max score for warp.
-            curr_max = cg::reduce(warp, score, cg::greater<float>());
-            // Sum up scores held by group leaders in warp and find max simultaneously.
-            curr_l = (group.thread_rank() == 0) ? expf(score - curr_max) : 0.0f;
-            unsigned mask = groupLeaderMask(group.size());
-            #pragma unroll
-            for (int offset = group.size(); offset < WARP; offset += group.size()) {
-                curr_l += __shfl_down_sync(mask, curr_l, offset);
-            }
-            // Caculate the actual l itself in thread 0.
-            if (warp.thread_rank() == 0) curr_l = expf(running_max - fmaxf(curr_max, running_max)) * running_l + expf(curr_max - fmaxf(curr_max, running_max)) * curr_l;
-            // Broadcast out the newly calculated l to all warp threads.
-            running_l = __shfl_sync(0xFFFFFFFF, curr_l, 0);
-            running_max = fmaxf(curr_max, running_max);
-            float weight = expf(score - running_max) / running_l;
-            float scaling_factor = expf(prev_max - running_max) * (prev_l / running_l);
+            updateSoftmaxState(score, mask, prev_max, prev_l, running_max, running_l, curr_max, curr_l, weight, scaling_factor, warp, group);
             
             pipeV.producer_acquire();
             pipeV.producer_commit();

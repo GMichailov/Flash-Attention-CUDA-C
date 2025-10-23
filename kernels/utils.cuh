@@ -45,13 +45,39 @@ __device__ __forceinline__ float computeTileScore(
 }
 
 
-__device__ __forceinline__ unsigned groupLeaderMask(int group_size) {
-    unsigned mask = 0;
+
+__device__ __forceinline__ void groupLeaderMask(int group_size, unsigned& mask) {
+    mask = 0;
     #pragma unroll
     for (uint8_t lane = 0; lane < 32; lane += group_size) {
         mask |= (1u << lane);
     }
-    return mask;
+}
+
+
+__device__ __forceinline__ void updateSoftmaxState(
+    float score, unsigned& mask,
+    float& prev_max, float& prev_l, float& running_max, float& running_l, float& curr_max, float& curr_l, float& weight, float& scaling_factor,
+    const auto& warp, const auto& group
+) {
+    prev_max = running_max;
+    prev_l = running_l;
+    // Sum group to get score and then find max score for warp.
+    curr_max = cg::reduce(warp, score, cg::greater<float>());
+    // Sum up scores held by group leaders in warp and find max simultaneously.
+    curr_l = (group.thread_rank() == 0) ? expf(score - curr_max) : 0.0f;
+    groupLeaderMask(group.size(), mask);
+    #pragma unroll
+    for (int offset = group.size(); offset < WARP; offset += group.size()) {
+        curr_l += __shfl_down_sync(mask, curr_l, offset);
+    }
+    // Caculate the actual l itself in thread 0.
+    if (warp.thread_rank() == 0) curr_l = expf(running_max - fmaxf(curr_max, running_max)) * running_l + expf(curr_max - fmaxf(curr_max, running_max)) * curr_l;
+    // Broadcast out the newly calculated l to all warp threads.
+    running_l = __shfl_sync(0xFFFFFFFF, curr_l, 0);
+    running_max = fmaxf(curr_max, running_max);
+    weight = expf(score - running_max) / running_l;
+    scaling_factor = expf(prev_max - running_max) * (prev_l / running_l);
 }
 
 
