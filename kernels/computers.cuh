@@ -42,9 +42,9 @@ __device__ __forceinline__ void twoLoaderMhaComputeWarp(
             pipeK.producer_acquire();
             pipeK.producer_commit();
             pipeK.consumer_wait();
-            score = 0.0f;
-            if (is_causal && (globalKVRow + group.meta_group_rank() > globalQRow + warp.meta_group_rank())) score = -INFINITY;
-            else computeAttentionScore<Q_TILE_ROWS, KV_TILE_ROWS, D_HEAD>(smemQ[bufQ], smemK[bufKV], scale, warp, group, score);
+
+            score = computeTileScore<D_HEAD, Q_TILE_ROWS, KV_TILE_ROWS>(smemQ[bufQ], smemV[bufKV], scale, is_causal, globalQRow, globalKVRow, warp, group);
+
             pipeK.consumer_release();
             group.sync();
             
@@ -64,7 +64,6 @@ __device__ __forceinline__ void twoLoaderMhaComputeWarp(
             // Broadcast out the newly calculated l to all warp threads.
             running_l = __shfl_sync(0xFFFFFFFF, curr_l, 0);
             running_max = fmaxf(curr_max, running_max);
-
             float weight = expf(score - running_max) / running_l;
             float scaling_factor = expf(prev_max - running_max) * (prev_l / running_l);
             

@@ -14,30 +14,12 @@ namespace cg = cooperative_groups;
 
 using pipe_t = cuda::pipeline<cuda::thread_scope_block>;
 
-template<int ROWS_PER_WARP, int D_HEAD>
-__device__ __forceinline__ int computeRowNoncausalAttentionScore(
-    const float* smemQBuf, const float* smemKBuf,
-    int relativeRow, float scale, int fragmentSize,
-    cg::thread_block_tile<WARP / ROWS_PER_WARP>& rowGroup
-) {
-    float partialDotProduct = 0.0f;
-    int idx = relativeRow * D_HEAD + rowGroup.thread_rank() * fragmentSize;
-    const float* qRowPtr = &smemQBuf[idx];
-    const float* kRowPtr = &smemKBuf[idx];
-    #pragma unroll
-    for (int i = 0; i < fragmentSize; i++) {
-        partialDotProduct += qRowPtr[i] * kRowPtr[i];
-    }
-    float score = cg::reduce(rowGroup, partialDotProduct, cg::plus<float>()) * scale;
-    return score;
-}
-
-
 template<int Q_TILE_ROWS, int KV_TILE_ROWS, int D_HEAD> 
-__device__ __forceinline__ void computeAttentionScore(
-    float* smemQPtr, float* smemKPtr,
-    const float scale, auto& warp, auto& group, float& score
+__device__ __forceinline__ float computeAttentionScore(
+    const float* smemQPtr, const float* smemKPtr,
+    float scale, const auto& warp, const auto& group
 ) {
+    float score = 0.0f;
     uint8_t fragmentSize = D_HEAD / group.size();
     smemQPtr += warp.meta_group_rank() * D_HEAD + group.thread_rank() * fragmentSize;
     smemKPtr += group.meta_group_rank() * D_HEAD + group.thread_rank() * fragmentSize;
@@ -47,6 +29,19 @@ __device__ __forceinline__ void computeAttentionScore(
     }
     group.sync();
     score = cg::reduce(group, score, cg::plus<float>()) * scale;
+    return score;
+}
+
+
+template<int D_HEAD, int Q_TILE_ROWS, int KV_TILE_ROWS>
+__device__ __forceinline__ float computeTileScore(
+    const float* smemQBuf, const float* smemKBuf,
+    float& scale, bool is_causal,
+    int globalQRow, int globalKVRow,
+    const auto& warp, const auto& group
+) {
+    if (is_causal && (globalKVRow + group.meta_group_rank() > globalQRow + warp.meta_group_rank())) return -INFINITY;
+    else return computeAttentionScore<Q_TILE_ROWS, KV_TILE_ROWS, D_HEAD>(smemQBuf, smemKBuf, scale, warp, group);
 }
 
 
@@ -67,8 +62,6 @@ __device__ __forceinline__ void threadRankMask(int group_size, int group_thread_
         mask |= (1u << i);
     }
 }
-
-
 
 
 template<int D_HEAD>
