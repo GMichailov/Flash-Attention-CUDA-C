@@ -44,18 +44,18 @@ __device__ __forceinline__ void twoLoaderMhaComputeWarp(
             pipeK.producer_commit();
             pipeK.consumer_wait();
 
-            score = computeTileScore<D_HEAD, Q_TILE_ROWS, KV_TILE_ROWS>(smemQ[bufQ], smemV[bufKV], scale, is_causal, globalQRow, globalKVRow, warp, group);
+            score = computeTileScore<D_HEAD, Q_TILE_ROWS, KV_TILE_ROWS, float>(smemQ[bufQ], smemV[bufKV], scale, is_causal, globalQRow, globalKVRow, warp, group);
 
             pipeK.consumer_release();
             group.sync();
             
-            updateSoftmaxState(score, mask, prev_max, prev_l, running_max, running_l, curr_max, curr_l, weight, scaling_factor, warp, group);
+            updateSoftmaxState<float>(score, mask, prev_max, prev_l, running_max, running_l, curr_max, curr_l, weight, scaling_factor, warp, group);
             
             pipeV.producer_acquire();
             pipeV.producer_commit();
             pipeV.consumer_wait();
             
-            multiplyVAccumulateO<D_HEAD>(smemV[bufKV], smemO, warp, group, mask, weight, scaling_factor, globalKVRow);
+            multiplyVAccumulateO<D_HEAD, float>(smemV[bufKV], smemO, warp, group, mask, weight, scaling_factor, globalKVRow);
 
             pipeV.consumer_release();
             bufKV ^= 1;

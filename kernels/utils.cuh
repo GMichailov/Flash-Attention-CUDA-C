@@ -14,17 +14,17 @@ namespace cg = cooperative_groups;
 
 using pipe_t = cuda::pipeline<cuda::thread_scope_block>;
 
-template<int Q_TILE_ROWS, int KV_TILE_ROWS, int D_HEAD> 
+template<int Q_TILE_ROWS, int KV_TILE_ROWS, int D_HEAD, typename scalar_t> 
 __device__ __forceinline__ float computeAttentionScore(
-    const float* smemQPtr, const float* smemKPtr,
-    float scale, const auto& warp, const auto& group
+    const scalar_t* smemQPtr, const scalar_t* smemKPtr,
+    scalar_t scale, const auto& warp, const auto& group
 ) {
-    float score = 0.0f;
+    scalar_t score = 0.0f;
     uint8_t fragmentSize = D_HEAD / group.size();
     smemQPtr += warp.meta_group_rank() * D_HEAD + group.thread_rank() * fragmentSize;
     smemKPtr += group.meta_group_rank() * D_HEAD + group.thread_rank() * fragmentSize;
     #pragma unroll
-    for (int i = 0; i < fragmentSize; ++i) {
+    for (uint8_t i = 0; i < fragmentSize; ++i) {
         score += smemQPtr[i] * smemKPtr[i];
     }
     group.sync();
@@ -33,15 +33,15 @@ __device__ __forceinline__ float computeAttentionScore(
 }
 
 
-template<int D_HEAD, int Q_TILE_ROWS, int KV_TILE_ROWS>
+template<int D_HEAD, int Q_TILE_ROWS, int KV_TILE_ROWS, typename scalar_t>
 __device__ __forceinline__ float computeTileScore(
-    const float* smemQBuf, const float* smemKBuf,
-    float& scale, bool is_causal,
+    const scalar_t* smemQBuf, const scalar_t* smemKBuf,
+    scalar_t& scale, bool is_causal,
     int globalQRow, int globalKVRow,
     const auto& warp, const auto& group
 ) {
     if (is_causal && (globalKVRow + group.meta_group_rank() > globalQRow + warp.meta_group_rank())) return -INFINITY;
-    else return computeAttentionScore<Q_TILE_ROWS, KV_TILE_ROWS, D_HEAD>(smemQBuf, smemKBuf, scale, warp, group);
+    else return computeAttentionScore<Q_TILE_ROWS, KV_TILE_ROWS, D_HEAD, scalar_t>(smemQBuf, smemKBuf, scale, warp, group);
 }
 
 
@@ -55,9 +55,10 @@ __device__ __forceinline__ void groupLeaderMask(int group_size, unsigned& mask) 
 }
 
 
+template<typename scalar_t>
 __device__ __forceinline__ void updateSoftmaxState(
-    float score, unsigned& mask,
-    float& prev_max, float& prev_l, float& running_max, float& running_l, float& curr_max, float& curr_l, float& weight, float& scaling_factor,
+    scalar_t score, unsigned& mask,
+    scalar_t& prev_max, scalar_t& prev_l, scalar_t& running_max, scalar_t& running_l, scalar_t& curr_max, scalar_t& curr_l, scalar_t& weight, scalar_t& scaling_factor,
     const auto& warp, const auto& group
 ) {
     prev_max = running_max;
@@ -90,17 +91,17 @@ __device__ __forceinline__ void threadRankMask(int group_size, int group_thread_
 }
 
 
-template<int D_HEAD>
+template<int D_HEAD, typename scalar_t>
 __device__ __forceinline__ void multiplyVAccumulateO(
-    float* smemVBuf, float* smemO,
+    const scalar_t* smemVBuf, scalar_t* smemO,
     const auto& warp, const auto& group, 
-    unsigned& mask, const float& weight, float& scaling_factor, int& globalKVRow
+    unsigned& mask, const scalar_t& weight, scalar_t& scaling_factor, int& globalKVRow
 ) {
     // Create mask so that thread X of each group in the warp sees each other.
     threadRankMask(group.size(), group.thread_rank(), mask);
     // For each float in fragment, accumulate into thread X of group 0 which will write to corresponding smemO index.
     for (int idx = 0; idx < (D_HEAD / group.size()); ++idx) {
-        float out = weight * smemVBuf[group.meta_group_rank() * D_HEAD + group.thread_rank() * (D_HEAD / group.size()) + idx];
+        scalar_t out = weight * smemVBuf[group.meta_group_rank() * D_HEAD + group.thread_rank() * (D_HEAD / group.size()) + idx];
         for (int offset = group.size(); offset < WARP; offset += group.size()) {
             out += __shfl_down_sync(mask, out, offset);
         }
